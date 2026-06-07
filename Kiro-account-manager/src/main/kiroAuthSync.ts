@@ -39,6 +39,14 @@ export const KIRO_BUILDER_ID_PLACEHOLDER_ARN = 'arn:aws:codewhisperer:us-east-1:
 // Social 登录（Github/Google）共用的 Kiro 后端固定 profileArn
 export const KIRO_SOCIAL_PROFILE_ARN = 'arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK'
 
+// Enterprise 备用 profileArn（自动获取失败时使用，区域动态替换）
+const ENTERPRISE_FALLBACK_PROFILE_ID = 'VNECVYCYYAWN'
+const ENTERPRISE_FALLBACK_ACCOUNT_ID = '610548660232'
+export function getEnterpriseFallbackArn(region?: string): string {
+  const r = region?.startsWith('eu-') ? 'eu-central-1' : 'us-east-1'
+  return `arn:aws:codewhisperer:${r}:${ENTERPRISE_FALLBACK_ACCOUNT_ID}:profile/${ENTERPRISE_FALLBACK_PROFILE_ID}`
+}
+
 const PLACEHOLDER_PROFILE_ARNS = new Set<string>([KIRO_BUILDER_ID_PLACEHOLDER_ARN])
 
 /** 检查给定 ARN 是不是已知占位符（旧版反代 / Kiro IDE 自身可能写入的脏数据） */

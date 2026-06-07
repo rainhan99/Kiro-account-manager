@@ -35,6 +35,14 @@ export function setUseKProxyForApiInProxy(enabled: boolean): void {
   useKProxyForApi = enabled
 }
 
+// profileArn 自愈持久化回调：当 Enterprise 账号在运行时首次解析出真实 profileArn 时，
+// 通过该回调通知主进程回写到 renderer store + 磁盘，避免每次请求都重新获取。
+type ProfileArnPersistCallback = (accountId: string, profileArn: string) => void
+let profileArnPersistCallback: ProfileArnPersistCallback | undefined
+export function setProfileArnPersistCallback(cb: ProfileArnPersistCallback | undefined): void {
+  profileArnPersistCallback = cb
+}
+
 export function setLogStreamEvents(enabled: boolean): void {
   logStreamEvents = enabled
 }
@@ -192,7 +200,8 @@ const AGENT_MODE_VIBE = 'vibe' // CLI 模式
 import {
   KIRO_BUILDER_ID_PLACEHOLDER_ARN as _KIRO_BUILDER_ID_PLACEHOLDER_ARN,
   KIRO_SOCIAL_PROFILE_ARN,
-  isPlaceholderProfileArn as _isPlaceholderProfileArn
+  isPlaceholderProfileArn as _isPlaceholderProfileArn,
+  getEnterpriseFallbackArn
 } from '../kiroAuthSync'
 
 export const KIRO_BUILDER_ID_PLACEHOLDER_ARN = _KIRO_BUILDER_ID_PLACEHOLDER_ARN
@@ -200,13 +209,18 @@ export const isPlaceholderProfileArn = _isPlaceholderProfileArn
 
 /**
  * 反代调 Kiro API 时使用的 profileArn 决策。
- * BuilderId 使用占位符 ARN，Social 使用固定 ARN。
- * 注意：流式端点（generateAssistantResponse / SendMessageStreaming）对占位符 ARN 会 403，
- * 需在 callKiroApiStream 中额外剥离。
+ * 优先级：真实 ARN（自动获取） > 备用固定 ARN（按账号类型）
+ * - 已有真实 ARN（非占位符） → 直接用
+ * - Enterprise/IdC → 区域化备用 ARN（自动获取失败时兜底）
+ * - Social（Github/Google） → 固定 social ARN
+ * - BuilderId → 占位符 ARN
  */
 function resolveProfileArn(account: ProxyAccount): string | undefined {
   if (account.profileArn && !isPlaceholderProfileArn(account.profileArn)) {
     return account.profileArn
+  }
+  if (account.provider === 'Enterprise' || account.authMethod === 'external_idp') {
+    return getEnterpriseFallbackArn(account.region)
   }
   if (account.authMethod === 'social' || account.provider === 'Github' || account.provider === 'Google') {
     return KIRO_SOCIAL_PROFILE_ARN
@@ -1160,19 +1174,25 @@ function getAccountMachineId(accountId: string, accountMachineId?: string): stri
 
 // 获取认证方式对应的请求头
 function getAuthHeaders(account: ProxyAccount, _endpoint: typeof KIRO_ENDPOINTS[0]): Record<string, string> {
-  const isIDC = account.authMethod?.toLowerCase() === 'idc'
   const machineId = getAccountMachineId(account.id, account.machineId)
-  const agentMode = isIDC ? AGENT_MODE_VIBE : AGENT_MODE_SPEC
+  // 官方 IDE 按 session mode 决定 agentMode，不按 provider 区分；统一用 vibe（聊天模式）
+  const agentMode = AGENT_MODE_VIBE
   
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     'x-amzn-kiro-agent-mode': agentMode,
-    'x-amz-user-agent': isIDC ? KIRO_CLI_AMZ_USER_AGENT : getKiroAmzUserAgent(machineId),
-    'user-agent': isIDC ? KIRO_CLI_USER_AGENT : getKiroUserAgent(machineId),
+    'x-amz-user-agent': getKiroAmzUserAgent(machineId),
+    'user-agent': getKiroUserAgent(machineId),
     'amz-sdk-invocation-id': uuidv4(),
     'amz-sdk-request': 'attempt=1; max=3',
     'Authorization': `Bearer ${account.accessToken}`
   }
+
+  // Enterprise External IdP 需要额外的 TokenType header（官方 addExternalIdpTokenTypeMiddleware）
+  if (account.authMethod === 'external_idp' || account.provider === 'ExternalIdp') {
+    headers['TokenType'] = 'EXTERNAL_IDP'
+  }
+
   return headers
 }
 
@@ -1217,16 +1237,31 @@ export async function callKiroApiStream(
   signal?: AbortSignal,
   preferredEndpoint?: 'codewhisperer' | 'amazonq' | 'amazonq-cli'
 ): Promise<void> {
-  const endpoints = getSortedEndpoints(preferredEndpoint)
+  const isEnterprise = account.provider === 'Enterprise' || account.authMethod === 'external_idp'
+  // Enterprise 账号只能走 CodeWhisperer 端点（AmazonQ 端点对 Enterprise IdC 返回 400/403）
+  const endpoints = getSortedEndpoints(isEnterprise ? 'codewhisperer' : preferredEndpoint)
+
+  // 所有账号类型：缺真实 profileArn 时尝试自动获取并持久化。失败时 resolveProfileArn 会返回备用 ARN。
+  if (!account.profileArn || isPlaceholderProfileArn(account.profileArn)) {
+    const fetchedArn = await fetchEnterpriseProfileArn(account)
+    if (fetchedArn) {
+      account.profileArn = fetchedArn
+      if (account.id) profileArnPersistCallback?.(account.id, fetchedArn)
+    }
+  }
+
   let lastError: Error | null = null
 
   for (const endpoint of endpoints) {
     try {
       throwIfAborted(signal)
       const requestPayload = clonePayload(payload)
-      // 流式端点对 BuilderId 占位符 ARN 返回 403，仅传真实 ARN 或 Social ARN
+      // profileArn 决策：
+      //   - Enterprise/IdC 账号有真实 ARN → 必须传（否则 403）
+      //   - BuilderId 占位符 ARN 在流式端点会 403 → 不传
+      //   - Social 固定 ARN → 传
       const resolvedArn = resolveProfileArn(account)
-      if (resolvedArn && !isPlaceholderProfileArn(resolvedArn)) {
+      if (resolvedArn && (!isPlaceholderProfileArn(resolvedArn) || isEnterprise)) {
         requestPayload.profileArn = resolvedArn
       } else {
         delete requestPayload.profileArn
@@ -1304,6 +1339,50 @@ export async function callKiroApiStream(
       if ((error as Error).message.includes('Auth error')) {
         onError(error as Error)
         return
+      }
+
+      // THINKING_SIGNATURE_INVALID: 剥离 history 中 reasoningContent 后重试一次（官方 IDE 同策略）
+      const errMsg = (error as Error).message || ''
+      if (errMsg.includes('THINKING_SIGNATURE_INVALID')) {
+        console.log(`[KiroAPI] THINKING_SIGNATURE_INVALID on ${endpoint.name}, retrying with reasoningContent stripped`)
+        try {
+          throwIfAborted(signal)
+          const retryPayload = clonePayload(payload)
+          // 剥离 history 中所有 assistantResponseMessage.reasoningContent
+          if (retryPayload.conversationState.history) {
+            for (const msg of retryPayload.conversationState.history) {
+              if (msg.assistantResponseMessage?.reasoningContent !== undefined) {
+                delete (msg.assistantResponseMessage as unknown as Record<string, unknown>).reasoningContent
+              }
+            }
+          }
+          // 复用同一端点的配置（与主流程 profileArn 逻辑一致）
+          const resolvedArn2 = resolveProfileArn(account)
+          if (resolvedArn2 && (!isPlaceholderProfileArn(resolvedArn2) || isEnterprise)) {
+            retryPayload.profileArn = resolvedArn2
+          } else {
+            delete retryPayload.profileArn
+          }
+          if (endpoint.name === 'CodeWhisperer') {
+            applyPayloadModelId(retryPayload, await resolveCodeWhispererModelId(account, getPayloadModelId(retryPayload), signal))
+          }
+          applyPayloadOrigin(retryPayload, endpoint.origin)
+          const retryStr = JSON.stringify(retryPayload)
+          const retryHeaders = getAuthHeaders(account, endpoint)
+          const retryAgent = getNetworkAgent(account)
+          const retryResponse = retryAgent
+            ? await undiciFetch(endpoint.url, { method: 'POST', headers: retryHeaders, body: retryStr, signal, dispatcher: retryAgent } as UndiciRequestInit) as unknown as Response
+            : await fetch(endpoint.url, { method: 'POST', headers: retryHeaders, body: retryStr, signal })
+          if (retryResponse.ok) {
+            await parseEventStream(retryResponse.body!, onChunk, onComplete, onError, retryStr.length, signal, getPayloadModelId(retryPayload), retryStr)
+            return
+          }
+          const retryBody = await retryResponse.text()
+          console.error(`[KiroAPI] THINKING_SIGNATURE_INVALID retry also failed: ${retryResponse.status} ${retryBody.slice(0, 200)}`)
+        } catch (retryErr) {
+          if (signal?.aborted) { onError(getAbortError(signal)); return }
+          console.error(`[KiroAPI] THINKING_SIGNATURE_INVALID retry error:`, retryErr)
+        }
       }
     }
   }
@@ -1472,13 +1551,17 @@ async function parseEventStream(
             // 根据 event type 处理不同类型的事件
             if (eventType === 'assistantResponseEvent' || event.assistantResponseEvent) {
               const assistantResp = event.assistantResponseEvent || event
-              const content = assistantResp.content
+              let content = assistantResp.content as string | undefined
               if (content) {
-                onChunk(content)
-                // 累积输出字符长度（兜底估算用）
-                totalOutputChars += content.length
-                // 累积输出文本（tiktoken 精确计算用）
-                collectedOutputText += content
+                // 过滤 Kiro 后端偶尔在文本中夹带的 <tool_use> XML（结构化 toolUseEvent 已单独处理）
+                content = content.replace(/<tool_use\b[^>]*>[\s\S]*?<\/tool_use>/g, '').trim()
+                if (content) {
+                  onChunk(content)
+                  // 累积输出字符长度（兜底估算用）
+                  totalOutputChars += content.length
+                  // 累积输出文本（tiktoken 精确计算用）
+                  collectedOutputText += content
+                }
               }
             }
 
@@ -1487,11 +1570,14 @@ async function parseEventStream(
             // CodeWhisperer/AmazonQ 端点用 AssistantResponseEvent 包代码，CLI 端点单独用 CodeEvent
             if (eventType === 'codeEvent' || event.codeEvent) {
               const codeResp = event.codeEvent || event
-              const content = codeResp.content
+              let content = codeResp.content as string | undefined
               if (content) {
-                onChunk(content)
-                totalOutputChars += content.length
-                collectedOutputText += content
+                content = content.replace(/<tool_use\b[^>]*>[\s\S]*?<\/tool_use>/g, '').trim()
+                if (content) {
+                  onChunk(content)
+                  totalOutputChars += content.length
+                  collectedOutputText += content
+                }
               }
             }
             
@@ -1966,6 +2052,62 @@ function getQServiceEndpoint(region?: string): string {
   return 'https://q.us-east-1.amazonaws.com'
 }
 
+// 根据账号区域获取 CodeWhisperer Runtime 端点
+function getCodeWhispererEndpoint(region?: string): string {
+  if (region?.startsWith('eu-')) return 'https://codewhisperer.eu-central-1.amazonaws.com'
+  return 'https://codewhisperer.us-east-1.amazonaws.com'
+}
+
+/**
+ * Enterprise 账号获取 profileArn（通过 CodeWhisperer Runtime 的 /ListAvailableProfiles）
+ * 官方 IDE 在认证后通过此 API 获取可用 profiles，用户选择后存储 ARN。
+ * 反代自动取第一个 profile。
+ */
+export async function fetchEnterpriseProfileArn(account: ProxyAccount): Promise<string | undefined> {
+  const baseUrl = getCodeWhispererEndpoint(account.region)
+  const url = `${baseUrl}/ListAvailableProfiles`
+  const machineId = getAccountMachineId(account.id, account.machineId)
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${account.accessToken}`,
+    'x-amz-user-agent': getKiroAmzUserAgent(machineId),
+    'user-agent': getKiroUserAgent(machineId),
+    'amz-sdk-invocation-id': uuidv4(),
+    'amz-sdk-request': 'attempt=1; max=1'
+  }
+
+  try {
+    const response = await fetchWithProxy(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({})
+    }, account)
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '')
+      console.error(`[KiroAPI] ListAvailableProfiles failed: ${response.status}`, errBody.slice(0, 200))
+      return undefined
+    }
+
+    const data = await response.json() as { profiles?: Array<{ arn?: string; profileName?: string }> }
+    const profiles = data.profiles || []
+    if (profiles.length === 0) {
+      console.warn('[KiroAPI] ListAvailableProfiles: no profiles returned')
+      return undefined
+    }
+
+    const arn = profiles[0].arn
+    if (arn) {
+      console.log(`[KiroAPI] Enterprise profileArn resolved: ${arn}`)
+    }
+    return arn || undefined
+  } catch (error) {
+    console.error('[KiroAPI] fetchEnterpriseProfileArn error:', error)
+    return undefined
+  }
+}
+
 // 获取 Kiro 官方模型列表（支持分页，与官方插件一致传递 profileArn）
 export async function fetchKiroModels(account: ProxyAccount, signal?: AbortSignal): Promise<KiroModel[]> {
   const baseUrl = getQServiceEndpoint(account.region)
@@ -1983,10 +2125,25 @@ export async function fetchKiroModels(account: ProxyAccount, signal?: AbortSigna
   const allModels: KiroModel[] = []
   let nextToken: string | undefined
 
+  // 所有账号类型：优先使用自动获取的真实 profileArn，失败时 resolveProfileArn 返回备用固定 ARN。
+  // 若账号尚未存储真实 ARN（如旧版本添加或占位符），尝试调 ListAvailableProfiles 获取并持久化。
+  if (!account.profileArn || isPlaceholderProfileArn(account.profileArn)) {
+    const fetchedArn = await fetchEnterpriseProfileArn(account)
+    if (fetchedArn) {
+      account.profileArn = fetchedArn
+      if (account.id) profileArnPersistCallback?.(account.id, fetchedArn)
+    }
+    // 获取失败时不阻塞，resolveProfileArn 会返回对应类型的备用 ARN
+  }
+
   try {
     do {
       const params = new URLSearchParams({ origin: 'AI_EDITOR', maxResults: '50' })
       const arnForModels = resolveProfileArn(account)
+      // profileArn 决策由 resolveProfileArn 统一处理：
+      //   - BuilderId → 占位符 ARN（ListAvailableModels 需要，有效）
+      //   - Github/Google → social ARN（有效）
+      //   - Enterprise → 真实 ARN（上方已自愈获取）
       if (arnForModels) params.set('profileArn', arnForModels)
       if (nextToken) params.set('nextToken', nextToken)
 
@@ -1996,7 +2153,8 @@ export async function fetchKiroModels(account: ProxyAccount, signal?: AbortSigna
       throwIfAborted(signal)
       
       if (!response.ok) {
-        console.error('[KiroAPI] ListAvailableModels failed:', response.status)
+        const errBody = await response.text().catch(() => '')
+        console.error(`[KiroAPI] ListAvailableModels failed: ${response.status}`, errBody.slice(0, 300))
         break
       }
 

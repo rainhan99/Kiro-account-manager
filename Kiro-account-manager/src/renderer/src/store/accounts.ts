@@ -1337,14 +1337,18 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           const accounts = new Map(state.accounts)
           const acc = accounts.get(id)
           if (acc) {
+            // Enterprise 账号刷新时主进程会返回真实 profileArn，持久化避免后续重复获取
+            const resolvedProfileArn = result.data!.profileArn || acc.credentials.profileArn || acc.profileArn
             accounts.set(id, {
               ...acc,
+              profileArn: resolvedProfileArn,
               credentials: {
                 ...acc.credentials,
                 accessToken: result.data!.accessToken,
                 // 如果返回了新的 refreshToken，更新它
                 refreshToken: result.data!.refreshToken || acc.credentials.refreshToken,
-                expiresAt: Date.now() + result.data!.expiresIn * 1000
+                expiresAt: Date.now() + result.data!.expiresIn * 1000,
+                profileArn: resolvedProfileArn
               },
               status: 'active',
               lastError: undefined,

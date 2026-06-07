@@ -235,7 +235,8 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
             startUrl: tokenData.startUrl,
             expiresAt: result.data.expiresIn ? now + result.data.expiresIn * 1000 : now + 3600 * 1000,
             authMethod: tokenData.authMethod as 'IdC' | 'social',
-            provider: (tokenData.provider || 'BuilderId') as 'BuilderId' | 'Github' | 'Google'
+            provider: (tokenData.provider || 'BuilderId') as 'BuilderId' | 'Github' | 'Google',
+            profileArn: result.data.profileArn
           },
           subscription: {
             type: result.data.subscriptionType as SubscriptionType,
@@ -780,7 +781,8 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
               region: cred.region || 'us-east-1',
               expiresAt: result.data.expiresIn ? now + result.data.expiresIn * 1000 : now + 3600 * 1000,
               authMethod,
-              provider
+              provider,
+              profileArn: result.data.profileArn
             },
             subscription: {
               type: result.data.subscriptionType as SubscriptionType,

@@ -60,6 +60,8 @@ interface RefreshResult {
     syncedToIde?: boolean
     /** 未同步到 IDE 时的原因描述（用于 UI 提示） */
     syncSkipReason?: string
+    /** Enterprise 账号刷新时主进程自动获取的真实 profileArn */
+    profileArn?: string
   }
   error?: { message: string }
 }
@@ -298,6 +300,7 @@ interface KiroApi {
       }
       daysRemaining?: number
       expiresAt?: number
+      profileArn?: string
     }
     error?: string
   }>
@@ -693,6 +696,9 @@ interface KiroApi {
 
   // 监听反代账号被封禁事件（TEMPORARILY_SUSPENDED / AccountSuspendedException）
   onProxyAccountSuspended: (callback: (info: { id: string; email?: string; reason: string; message: string; suspendedAt: number }) => void) => () => void
+
+  // 监听反代账号更新事件（token 刷新 / Enterprise profileArn 自愈）
+  onProxyAccountUpdate: (callback: (info: { id: string; accessToken?: string; refreshToken?: string; expiresAt?: number; profileArn?: string }) => void) => () => void
 
   // ============ Usage API 类型设置 ============
 

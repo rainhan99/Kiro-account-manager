@@ -272,6 +272,39 @@ npx electron-builder --linux --arm64
 ## 📋 更新日志
 
 
+### v1.7.5 (2026-6-7) — 思考模式支持 + Enterprise profileArn 完整修复 + 工具调用泄漏修复
+
+#### 🧠 思考模式支持（Claude 4.6+）
+
+- **新增**: 完整支持 Claude 4.6+ 模型的思考/扩展思考模式 — 自动从 `ListAvailableModels` 响应的 `additionalModelRequestFieldsSchema` 检测模型思考能力
+- **新增**: OpenAI 格式 `thinking: {type, budget_tokens}` 和 `reasoning_effort` 映射为 Kiro 的 `additionalModelRequestFields`（支持 `output_config` 和 `reasoning` 两种 schema path）
+- **新增**: Claude `/v1/messages` 格式 `thinking: {type:"enabled", budget_tokens}` 映射为对应 effort 级别（`low/medium/high/xhigh`）
+- **新增**: 流式推理内容输出 — OpenAI 格式使用 `reasoning_content` 字段，Claude 格式使用 `thinking` content block
+- **新增**: `THINKING_SIGNATURE_INVALID` 错误自动重试 — 自动剥离历史中的 `reasoningContent` 后重试（模型更新导致签名失效）
+
+#### 🔐 Enterprise 账号 profileArn 完整修复
+
+- **修复**: Enterprise (IdC) 账号现在正确通过 `POST codewhisperer.{region}.amazonaws.com/ListAvailableProfiles` 获取真实 profileArn
+- **修复**: Enterprise 账号强制使用 CodeWhisperer 端点（AmazonQ 端点对 Enterprise IdC 返回 400/403）
+- **新增**: profileArn 自愈机制 — 所有账号类型（BuilderId/Github/Google/Enterprise）在首次请求时尝试自动获取；获取的 ARN 通过 IPC 回调持久化到磁盘，后续不再重复获取
+- **新增**: Enterprise 备用 ARN — 自动获取失败时使用区域化 `arn:aws:codewhisperer:{region}:610548660232:profile/VNECVYCYYAWN` 兜底
+- **新增**: `setProfileArnPersistCallback` 模块级回调 — 自愈的 profileArn 回写到账号池 + renderer store + 内存快照
+- **新增**: `onProxyAccountUpdate` IPC 事件 — renderer 监听并将 profileArn 持久化到顶层和 `credentials.profileArn`
+- **修复**: 同步字段错位 — `ProxyPanel` 和 lazy-sync 现在兼容读取 `acc.profileArn || acc.credentials?.profileArn`
+- **修复**: `refresh-account-token` 和 `verify-account-credentials` 现对所有账号类型自动获取 profileArn（不再限于 Enterprise）
+- **修复**: `refreshAccountToken` store action 现保存返回的 profileArn 到顶层和 credentials 双位置
+
+#### 🔧 工具调用 XML 泄漏修复
+
+- **修复**: Kiro 后端偶尔在文本内容（`assistantResponseEvent` / `codeEvent`）中夹带 `<tool_use id="...">...</tool_use>` XML（与结构化 `toolUseEvent` 并发）— 现在从文本输出中过滤这些 XML 标签，防止客户端显示原始标签
+
+#### 🗑️ 批量订阅：删除失败账号
+
+- **新增**: 批量订阅获取链接界面的"清失败"按钮旁新增「连删账号」勾选框 — 勾选后移除失败/过期链接时同时永久删除对应账号（用于清理封号账号）
+- **新增**: 勾选时按钮变红色警告样式，确认弹窗提示"并永久删除账号"
+
+---
+
 ### v1.7.4 (2026-6-5) — profileArn 精细化策略 + CI 修复 + 日志脱敏修正 + 注册流程防悬挂
 
 #### 🛡️ profileArn 策略精细化

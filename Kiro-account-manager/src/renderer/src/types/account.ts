@@ -22,6 +22,7 @@ export interface AccountCredentials {
   expiresAt: number      // 时间戳
   authMethod?: 'IdC' | 'social'  // 认证方式：IdC (BuilderId/Enterprise) 或 social (GitHub/Google)
   provider?: 'BuilderId' | 'Enterprise' | 'Github' | 'Google' | 'IAM_SSO'  // 身份提供商
+  profileArn?: string    // Enterprise 真实 profileArn（从 ListAvailableProfiles 获取）
 }
 
 /**

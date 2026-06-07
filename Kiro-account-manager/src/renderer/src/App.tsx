@@ -28,7 +28,8 @@ function App(): React.JSX.Element {
     activeAccountId,
     setActiveAccount,
     checkAndRefreshExpiringTokens,
-    updateAccountStatus
+    updateAccountStatus,
+    updateAccount
   } = useAccountsStore()
 
   // 切换到下一个可用账户
@@ -256,6 +257,23 @@ function App(): React.JSX.Element {
       unsubscribe()
     }
   }, [updateAccountStatus])
+
+  // 监听反代账号更新事件（Enterprise profileArn 自愈），持久化到 store + 磁盘
+  useEffect(() => {
+    const unsubscribe = window.api.onProxyAccountUpdate((info) => {
+      if (!info.profileArn) return
+      const account = useAccountsStore.getState().accounts.get(info.id)
+      if (!account || account.credentials?.profileArn === info.profileArn) return
+      updateAccount(info.id, {
+        profileArn: info.profileArn,
+        credentials: { ...account.credentials, profileArn: info.profileArn }
+      })
+      console.log(`[App] Persisted Enterprise profileArn for ${info.id}`)
+    })
+    return () => {
+      unsubscribe()
+    }
+  }, [updateAccount])
 
   const renderPage = () => {
     switch (currentPage) {

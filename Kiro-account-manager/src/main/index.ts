@@ -16,7 +16,7 @@ import {
   type KProxyConfig,
   type DeviceIdMapping
 } from './kproxy'
-import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setUseKProxyForApiInProxy, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve, setEnableTokenBufferReserve, callKiroApi } from './proxy/kiroApi'
+import { fetchKiroModels, fetchSubscriptionToken, fetchAvailableSubscriptions, setUserPreference, setUseKProxyForApiInProxy, setLogStreamEvents, setPayloadSizeLimitKB, setTokenBufferReserve, setEnableTokenBufferReserve, callKiroApi, fetchEnterpriseProfileArn, setProfileArnPersistCallback } from './proxy/kiroApi'
 import {
   writeKiroAuthTokenFile,
   readKiroAuthTokenFile,
@@ -474,7 +474,7 @@ function initProxyServer(): ProxyServer {
             email: acc.email,
             accessToken: acc.credentials.accessToken,
             refreshToken: acc.credentials?.refreshToken,
-            profileArn: acc.profileArn,
+            profileArn: acc.profileArn || acc.credentials?.profileArn,
             expiresAt: acc.credentials?.expiresAt,
             machineId: acc.machineId,
             clientId: acc.credentials?.clientId,
@@ -498,6 +498,26 @@ function initProxyServer(): ProxyServer {
   proxyServer.setWebhookTrigger((event, payload) => {
     // 通过 IPC 转发到 renderer，由 useWebhookStore.triggerEvent 实际发送
     mainWindow?.webContents.send('proxy-webhook-trigger', { event, payload })
+  })
+
+  // Enterprise profileArn 自愈持久化：运行时首次解析出真实 profileArn 时，
+  // 回写到账号池 + 内存快照 + 通知 renderer 落盘，避免每次请求重复获取。
+  setProfileArnPersistCallback((accountId, profileArn) => {
+    try {
+      proxyServer?.getAccountPool().updateAccount(accountId, { profileArn })
+      // 推送 IPC，让 renderer store 把 profileArn 写入账号数据
+      mainWindow?.webContents.send('proxy-account-update', { id: accountId, profileArn })
+      // 同步更新内存快照，确保下次整库落盘时带上 profileArn
+      if (lastSavedData && typeof lastSavedData === 'object') {
+        const data = lastSavedData as { accounts?: Record<string, Record<string, unknown>> }
+        if (data.accounts?.[accountId]) {
+          data.accounts[accountId] = { ...data.accounts[accountId], profileArn }
+        }
+      }
+      console.log(`[ProxyServer] Persisted Enterprise profileArn for ${accountId}: ${profileArn}`)
+    } catch (e) {
+      console.warn('[ProxyServer] Failed to persist profileArn:', e)
+    }
   })
 
   // 恢复保存的累计 credits
@@ -2877,12 +2897,35 @@ app.whenReady().then(async () => {
         console.warn('[Refresh] Failed to sync token to IDE:', e)
       }
 
+      // 所有账号类型：刷新后自动获取 profileArn（如果缺失）
+      let resolvedEnterpriseArn: string | undefined
+      const existingProfileArn = account.profileArn || account.credentials?.profileArn
+      if (!existingProfileArn) {
+        try {
+          resolvedEnterpriseArn = await fetchEnterpriseProfileArn({
+            id: account.id || '',
+            accessToken: newAccess,
+            region: region || 'us-east-1',
+            provider,
+            authMethod: authMethod as 'IdC' | 'social' | 'idc' | 'external_idp' | undefined,
+            machineId: account.machineId
+          })
+          if (resolvedEnterpriseArn) {
+            console.log(`[Refresh] profileArn auto-resolved: ${resolvedEnterpriseArn}`)
+          }
+        } catch (e) {
+          console.warn('[Refresh] Failed to fetch profileArn:', e)
+        }
+      }
+
       return {
         success: true,
         data: {
           accessToken: newAccess,
           refreshToken: newRefresh,
           expiresIn,
+          // Enterprise 自动获取的 profileArn（renderer 需要存储到账号数据）
+          profileArn: resolvedEnterpriseArn || undefined,
           // 让 renderer 决定是否给用户显示"已同步到 IDE"的反馈
           syncedToIde,
           syncSkipReason
@@ -4292,6 +4335,25 @@ app.whenReady().then(async () => {
       }
       
       console.log('[Verify] Success! Email:', email)
+
+      // 所有账号类型：验证时自动获取 profileArn
+      let enterpriseProfileArn: string | undefined
+      {
+        try {
+          enterpriseProfileArn = await fetchEnterpriseProfileArn({
+            id: '',
+            accessToken: refreshResult.accessToken!,
+            region: region || 'us-east-1',
+            provider,
+            authMethod: authMethod as 'IdC' | 'social' | 'idc' | 'external_idp' | undefined
+          })
+          if (enterpriseProfileArn) {
+            console.log(`[Verify] profileArn auto-resolved: ${enterpriseProfileArn}`)
+          }
+        } catch (e) {
+          console.warn('[Verify] Failed to fetch profileArn:', e)
+        }
+      }
       
       return {
         success: true,
@@ -4301,6 +4363,7 @@ app.whenReady().then(async () => {
           accessToken: refreshResult.accessToken,
           refreshToken: refreshResult.refreshToken || refreshToken,
           expiresIn: refreshResult.expiresIn,
+          profileArn: enterpriseProfileArn || undefined,
           subscriptionType,
           subscriptionTitle,
           subscription: {

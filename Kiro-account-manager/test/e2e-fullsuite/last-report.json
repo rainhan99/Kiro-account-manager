@@ -1,0 +1,483 @@
+{
+  "capturedAt": "2026-05-16T19:57:26.787Z",
+  "base": "http://127.0.0.1:5580",
+  "only": "",
+  "summary": {
+    "total": 30,
+    "pass": 29,
+    "fail": 0,
+    "error": 1,
+    "durationMs": 232232
+  },
+  "results": [
+    {
+      "id": "CASE-01-probe",
+      "title": "Claude Code probe 请求 (max_tokens=1)",
+      "tags": [
+        "anthropic",
+        "probe",
+        "basic"
+      ],
+      "status": "error",
+      "durationMs": 10010,
+      "error": {
+        "type": "Error",
+        "message": "fetch failed: client-timeout",
+        "stack": "Error: fetch failed: client-timeout\n    at postAnthropic (file:///F:/Trace/TEST/Kiro/Kiro-account-manager/test/e2e-fullsuite/lib/http.mjs:55:11)\n    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)\n    at async Object.run (file:///F:/Trace/TEST/Kiro/Kiro-account-manager/test/e2e-fullsuite/cases/01-probe.mjs:21:20)\n    at async runCases (file:///F:/Trace/TEST/Kiro/Kiro-account-manager/test/e2e-fullsuite/lib/runner.mjs:47:7)\n    at async main (file:///F:/Trace/TEST/Kiro/Kiro-account-manager/test/e2e-fullsuite/run.mjs:63:19)"
+      },
+      "logs": []
+    },
+    {
+      "id": "CASE-02-anthropic-stream-simple",
+      "title": "Anthropic 流式简单对话",
+      "tags": [
+        "anthropic",
+        "stream",
+        "basic"
+      ],
+      "status": "pass",
+      "durationMs": 4673,
+      "logs": [
+        "status=200 kind=stream ttfb=20ms total=4671ms",
+        "events=[message_start,content_block_start,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_delta,content_block_stop,message_delta,message_stop]",
+        "text=我是 Kiro，一个 AI 驱动的开发助手，帮你写代码、调试和处理工程任务，让你专注于设计和决策。..."
+      ]
+    },
+    {
+      "id": "CASE-03-anthropic-nostream",
+      "title": "Anthropic 非流式简单对话",
+      "tags": [
+        "anthropic",
+        "nonstream",
+        "basic"
+      ],
+      "status": "pass",
+      "durationMs": 7365,
+      "logs": [
+        "status=200 total=7365ms",
+        "text=现在是2026年5月中旬，北半球正值春末初夏，南半球则是秋末初冬。..."
+      ]
+    },
+    {
+      "id": "CASE-04-system-array",
+      "title": "system=array 多 block (复刻 Claude Code 结构)",
+      "tags": [
+        "anthropic",
+        "system",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 12800,
+      "logs": [
+        "status=200 kind=stream",
+        "text=我是 Claude Code，能在终端里帮你完成软件工程任务。主要能力：\n\n- **读写代码**：浏览仓库、读取文件、编辑或新建文件\n- **执行命令**：运行构建、测试、lint、git等终端命令\n..."
+      ]
+    },
+    {
+      "id": "CASE-05-tool-declared-no-force",
+      "title": "声明工具不强制 + schema 元字段 ($schema/additionalProperties)",
+      "tags": [
+        "anthropic",
+        "tool",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 7938,
+      "logs": [
+        "status=200 kind=stream",
+        "blocks=text"
+      ]
+    },
+    {
+      "id": "CASE-06-tool-forced-name-roundtrip",
+      "title": "强制调用工具 + 验证 PascalCase 工具名反向映射 (client_tool_* → GetWeather)",
+      "tags": [
+        "anthropic",
+        "tool",
+        "name-mapping",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 7665,
+      "logs": [
+        "status=200 kind=stream",
+        "tool_use.name=GetWeather tool_use.input={\"city\":\"北京\"}"
+      ]
+    },
+    {
+      "id": "CASE-07-multi-turn-tool-result-and-text",
+      "title": "关键: user message 含 tool_result + text 多 block (修复后不报 invalid_argument)",
+      "tags": [
+        "anthropic",
+        "tool",
+        "multi-turn",
+        "regression",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 7718,
+      "logs": [
+        "status=200 kind=stream",
+        "assistant text=28°C 晴天微风，穿短袖加薄长裤就行，记得防晒。..."
+      ]
+    },
+    {
+      "id": "CASE-08-thinking-multi-turn",
+      "title": "assistant.thinking + signature 多轮回传 (signature 丢弃路径)",
+      "tags": [
+        "anthropic",
+        "thinking",
+        "multi-turn",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 9758,
+      "logs": [
+        "status=200 kind=stream",
+        "assistant text=1 不是质数。\n\n质数的定义要求大于 1，且只有两个不同的正因数（1 和它自己）。而 1 只有一个因数（就是 1 本身），不满足\"两个不同因数\"的条件，所以被排除在外。\n\n最小的质数是 2，也是唯一的偶质数。..."
+      ]
+    },
+    {
+      "id": "CASE-09-skill-replay",
+      "title": "Claude Code Skill 工具调用真实结构复刻 (修复 502 后的回归测试)",
+      "tags": [
+        "anthropic",
+        "skill",
+        "multi-turn",
+        "regression",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 8501,
+      "logs": [
+        "status=200 kind=stream total=8500ms",
+        "blocks=text"
+      ]
+    },
+    {
+      "id": "CASE-10-mcp-schema",
+      "title": "MCP 风格嵌套 schema ($ref/definitions/additionalProperties 剥离)",
+      "tags": [
+        "anthropic",
+        "tool",
+        "mcp",
+        "schema",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 11784,
+      "logs": [
+        "status=200 kind=stream",
+        "blocks=text"
+      ]
+    },
+    {
+      "id": "CASE-11-large-tool-desc",
+      "title": "12KB tool description 触发截断 + tool_documentation 注入",
+      "tags": [
+        "anthropic",
+        "tool",
+        "truncation",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 8023,
+      "logs": [
+        "status=200 kind=stream",
+        "blocks=text"
+      ]
+    },
+    {
+      "id": "CASE-12-openai-stream-simple",
+      "title": "OpenAI /v1/chat/completions 流式简单对话",
+      "tags": [
+        "openai",
+        "stream",
+        "basic"
+      ],
+      "status": "pass",
+      "durationMs": 8943,
+      "logs": [
+        "status=200 kind=stream ttfb=19ms",
+        "content=我是 Kiro，一个 AI 驱动的开发助手，帮你写代码、调试和完成各类技术任务。..."
+      ]
+    },
+    {
+      "id": "CASE-13-openai-tool-call-and-multi-turn",
+      "title": "OpenAI 端点: 强制工具调用 + 多轮 tool message",
+      "tags": [
+        "openai",
+        "tool",
+        "multi-turn",
+        "stream",
+        "name-mapping"
+      ],
+      "status": "pass",
+      "durationMs": 25369,
+      "logs": [
+        "step1: status=200 kind=stream",
+        "step1 tool_call.name=GetWeather args={\"city\":\"深圳\"}",
+        "step2: status=200 kind=stream",
+        "step2 content=深圳今天 30°C 多云、湿度偏高，建议穿轻薄透气的短袖加短裤或裙装，注意防晒并随身备水。..."
+      ]
+    },
+    {
+      "id": "CASE-14-opencode-reasoning-effort-and-text",
+      "title": "opencode: providerOptions.openaiCompatible.reasoningEffort + delta.reasoning_text 双发",
+      "tags": [
+        "openai",
+        "opencode",
+        "reasoning",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 7472,
+      "logs": [
+        "status=200 kind=stream ttfb=12ms",
+        "content=是，7 是质数。...",
+        "模型本次未输出 reasoning, 跳过双发验证 (上游行为差异, 不算失败)"
+      ]
+    },
+    {
+      "id": "CASE-15-opencode-multi-turn-provider-metadata",
+      "title": "opencode: 多轮 assistant.providerOptions.openaiCompatible 回传不报 schema 错",
+      "tags": [
+        "openai",
+        "opencode",
+        "reasoning",
+        "multi-turn",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 8275,
+      "logs": [
+        "status=200 kind=stream",
+        "content=1 不是质数。\n\n质数的定义要求是**大于 1** 的自然数，且只有1 和自身两个不同的因数。1 只有一个因数（就是它自己），所以被排除在外。\n\n最小的质数是 ..."
+      ]
+    },
+    {
+      "id": "CASE-16-opencode-prompt-cache-key-sticky",
+      "title": "opencode: promptCacheKey body 字段 → session 粘性入口不报错",
+      "tags": [
+        "openai",
+        "opencode",
+        "session",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 14788,
+      "logs": [
+        "promptCacheKey=e2e-opencode-mp8rnv1a",
+        "turn1: status=200 kind=stream",
+        "turn1 content=你好,很高兴见到你!...",
+        "turn2: status=200 kind=stream",
+        "turn2 content=谢谢。..."
+      ]
+    },
+    {
+      "id": "CASE-17-auth-missing-token",
+      "title": "无 token 反代返回 401",
+      "tags": [
+        "anthropic",
+        "auth",
+        "error"
+      ],
+      "status": "pass",
+      "durationMs": 5,
+      "logs": [
+        "status=401 body={\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"Invalid or missing API key\"}}"
+      ]
+    },
+    {
+      "id": "CASE-18-auth-wrong-token",
+      "title": "错误 token 反代返回 401",
+      "tags": [
+        "anthropic",
+        "auth",
+        "error"
+      ],
+      "status": "pass",
+      "durationMs": 4,
+      "logs": [
+        "status=401 body={\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"Invalid or missing API key\"}}"
+      ]
+    },
+    {
+      "id": "CASE-19-invalid-json",
+      "title": "非法 JSON body 返回 400",
+      "tags": [
+        "anthropic",
+        "error",
+        "validation"
+      ],
+      "status": "pass",
+      "durationMs": 9,
+      "logs": [
+        "status=500 body={\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Unexpected token 'h', \\\"this is { d\\\"... is not valid JSON\"}}"
+      ]
+    },
+    {
+      "id": "CASE-20-unknown-model",
+      "title": "不存在 model 兜底映射",
+      "tags": [
+        "anthropic",
+        "model-mapping",
+        "fallback",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 7747,
+      "logs": [
+        "status=200 kind=stream"
+      ]
+    },
+    {
+      "id": "CASE-21-client-abort",
+      "title": "客户端 abort 中途断流, 反代不挂死",
+      "tags": [
+        "anthropic",
+        "abort",
+        "robustness"
+      ],
+      "status": "pass",
+      "durationMs": 9421,
+      "logs": [
+        "first request aborted=true",
+        "second request status=200 kind=stream"
+      ]
+    },
+    {
+      "id": "CASE-22-count-tokens",
+      "title": "/v1/messages/count_tokens 端点",
+      "tags": [
+        "anthropic",
+        "endpoint"
+      ],
+      "status": "pass",
+      "durationMs": 8,
+      "logs": [
+        "status=200 body={\"input_tokens\":12}"
+      ]
+    },
+    {
+      "id": "CASE-23-models-list",
+      "title": "GET /v1/models 端点",
+      "tags": [
+        "endpoint",
+        "models"
+      ],
+      "status": "pass",
+      "durationMs": 7,
+      "logs": [
+        "status=200 bytes=18787",
+        "models=18, first=auto"
+      ]
+    },
+    {
+      "id": "CASE-24-openai-responses",
+      "title": "POST /v1/responses (OpenAI Responses API)",
+      "tags": [
+        "openai",
+        "endpoint",
+        "responses"
+      ],
+      "status": "pass",
+      "durationMs": 10805,
+      "logs": [
+        "status=200 bytes=340"
+      ]
+    },
+    {
+      "id": "CASE-25-image-base64",
+      "title": "多模态 image base64 输入",
+      "tags": [
+        "anthropic",
+        "multimodal",
+        "image",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 7569,
+      "logs": [
+        "status=200 kind=stream"
+      ]
+    },
+    {
+      "id": "CASE-26-tool-choice-any",
+      "title": "tool_choice=any 强制调用某工具",
+      "tags": [
+        "anthropic",
+        "tool",
+        "tool-choice",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 7613,
+      "logs": [
+        "status=200 kind=stream",
+        "tool_use.name=GetWeather"
+      ]
+    },
+    {
+      "id": "CASE-27-tool-choice-none",
+      "title": "tool_choice=none 禁止调用工具",
+      "tags": [
+        "anthropic",
+        "tool",
+        "tool-choice",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 12782,
+      "logs": [
+        "status=200 kind=stream"
+      ]
+    },
+    {
+      "id": "CASE-28-stop-sequences",
+      "title": "stop_sequences 字段生效",
+      "tags": [
+        "anthropic",
+        "inference",
+        "stream"
+      ],
+      "status": "pass",
+      "durationMs": 7312,
+      "logs": [
+        "status=200 kind=stream",
+        "text=hello\n\nEND_OF_RESPONSE, stop_reason=end_turn"
+      ]
+    },
+    {
+      "id": "CASE-29-admin-stats-tracking",
+      "title": "admin/stats 请求计数随调用增加",
+      "tags": [
+        "admin",
+        "stats",
+        "tracking"
+      ],
+      "status": "pass",
+      "durationMs": 7838,
+      "logs": [
+        "baseline totalRequests=3355",
+        "after totalRequests=3356"
+      ]
+    },
+    {
+      "id": "CASE-30-admin-config-apikeys",
+      "title": "admin/config apiKeys 字段可读",
+      "tags": [
+        "admin",
+        "apikey",
+        "config"
+      ],
+      "status": "pass",
+      "durationMs": 4,
+      "logs": [
+        "status=200",
+        "apiKeys count=2",
+        "legacy apiKey: ***"
+      ]
+    }
+  ]
+}

@@ -283,7 +283,7 @@ export function ProxyPanel() {
           email: acc.email,
           accessToken: acc.credentials.accessToken,
           refreshToken: acc.credentials?.refreshToken,
-          profileArn: acc.profileArn,
+          profileArn: acc.profileArn || acc.credentials?.profileArn,
           expiresAt: acc.credentials?.expiresAt,
           machineId: acc.machineId,
           // Token 刷新所需字段

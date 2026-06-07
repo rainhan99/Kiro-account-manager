@@ -272,6 +272,39 @@ The project is configured with GitHub Actions workflow for auto building all pla
 ## 📋 Changelog
 
 
+### v1.7.5 (2026-6-7) — Thinking Mode + Enterprise profileArn Full Fix + Tool Use Leak Fix
+
+#### 🧠 Thinking Mode Support (Claude 4.6+)
+
+- **New**: Full thinking/extended thinking support for Claude 4.6+ models — automatically reads `additionalModelRequestFieldsSchema` from `ListAvailableModels` response to detect thinking capability
+- **New**: Maps OpenAI `thinking: {type, budget_tokens}` and `reasoning_effort` to Kiro's `additionalModelRequestFields` (supports both `output_config` and `reasoning` schema paths)
+- **New**: Maps Claude `/v1/messages` `thinking: {type:"enabled", budget_tokens}` to corresponding effort levels (`low/medium/high/xhigh`)
+- **New**: Streaming reasoning content output — `reasoning_content` field in OpenAI format, `thinking` content blocks in Claude format
+- **New**: `THINKING_SIGNATURE_INVALID` error auto-retry — strips `reasoningContent` from history and retries (signature invalidation due to model updates)
+
+#### 🔐 Enterprise Account profileArn Full Fix
+
+- **Fix**: Enterprise (IdC) accounts now correctly fetch real `profileArn` via `POST codewhisperer.{region}.amazonaws.com/ListAvailableProfiles`
+- **Fix**: Enterprise accounts forced to use CodeWhisperer endpoint (AmazonQ endpoint returns 400/403 for Enterprise IdC tokens)
+- **New**: Self-healing profileArn — all account types (BuilderId/Github/Google/Enterprise) attempt auto-fetch on first request; fetched ARN is persisted to disk via IPC callback, never re-fetched
+- **New**: Fallback ARN for Enterprise — region-aware `arn:aws:codewhisperer:{region}:610548660232:profile/VNECVYCYYAWN` used when auto-fetch fails
+- **New**: `setProfileArnPersistCallback` module-level callback — self-healed profileArn writes back to account pool + renderer store + memory snapshot
+- **New**: `onProxyAccountUpdate` IPC event — renderer listens and persists profileArn to both top-level and `credentials.profileArn`
+- **Fix**: Sync field mismatch — `ProxyPanel` and lazy-sync now read `acc.profileArn || acc.credentials?.profileArn`
+- **Fix**: `refresh-account-token` and `verify-account-credentials` now auto-fetch profileArn for ALL account types (not just Enterprise)
+- **Fix**: `refreshAccountToken` store action now saves returned profileArn to both top-level and credentials
+
+#### 🔧 Tool Use XML Leak Fix
+
+- **Fix**: Kiro backend occasionally sends `<tool_use id="...">...</tool_use>` XML as text content (in `assistantResponseEvent` / `codeEvent`) alongside structured `toolUseEvent` — these are now stripped from text output, preventing raw XML tags from appearing in client responses
+
+#### 🗑️ Subscription: Delete Failed Accounts
+
+- **New**: "Delete accounts" checkbox next to "Remove Failed" button in batch subscription link view — when checked, removing failed/expired links also permanently deletes the corresponding accounts (for banned account cleanup)
+- **New**: Button turns red when checkbox is active; confirmation dialog warns about permanent account deletion
+
+---
+
 ### v1.7.4 (2026-6-5) — profileArn Refined Strategy + CI Fix + Log Redaction Fix + Registration Anti-Hang
 
 #### 🛡️ profileArn Strategy Refinement

@@ -832,6 +832,17 @@ const api = {
     }
   },
 
+  // 监听反代账号更新事件（token 刷新 / Enterprise profileArn 自愈）
+  onProxyAccountUpdate: (callback: (info: { id: string; accessToken?: string; refreshToken?: string; expiresAt?: number; profileArn?: string }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, info: { id: string; accessToken?: string; refreshToken?: string; expiresAt?: number; profileArn?: string }): void => {
+      callback(info)
+    }
+    ipcRenderer.on('proxy-account-update', handler)
+    return () => {
+      ipcRenderer.removeListener('proxy-account-update', handler)
+    }
+  },
+
   // ============ Usage API 类型设置 ============
 
   // 获取 Usage API 类型
