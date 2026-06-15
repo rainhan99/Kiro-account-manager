@@ -673,6 +673,22 @@ function normalizeDocumentFormat(mediaType: string | undefined, name: string): s
 // Kiro API 工具描述最大长度
 const KIRO_MAX_TOOL_DESC_LEN = 10237 // 留出 "..." 的空间
 
+// 规范化工具的 inputSchema，保证发给 Bedrock 的始终是合法的 JSON Schema 对象。
+// Bedrock Converse 要求 toolSpec.inputSchema.json 必须是 { type: "object", ... }；
+// 当客户端工具缺失 / null / 空 / 非 object 的 input_schema 时（部分 MCP 工具会这样），
+// 原样透传会让 Bedrock 判 TOOL_SCHEMA_INVALID 而拒绝整个请求，导致所有工具调用失败。
+function normalizeToolInputSchema(schema: unknown): Record<string, unknown> {
+  const base =
+    schema && typeof schema === 'object' && !Array.isArray(schema)
+      ? (schema as Record<string, unknown>)
+      : {}
+  const properties =
+    base.properties && typeof base.properties === 'object' && !Array.isArray(base.properties)
+      ? base.properties
+      : {}
+  return { ...base, type: 'object', properties }
+}
+
 function convertOpenAITools(
   tools: OpenAITool[] | undefined,
   toolNameRegistry: ToolNameRegistry
@@ -689,7 +705,7 @@ function convertOpenAITools(
       toolSpecification: {
         name: shortenToolName(tool.function.name, toolNameRegistry),
         description,
-        inputSchema: { json: tool.function.parameters }
+        inputSchema: { json: normalizeToolInputSchema(tool.function.parameters) }
       }
     }
     const cachePoint = toKiroCachePoint(tool.cache_control)
@@ -1177,7 +1193,7 @@ function convertClaudeTools(
       toolSpecification: {
         name: shortenToolName(tool.name, toolNameRegistry),
         description,
-        inputSchema: { json: tool.input_schema }
+        inputSchema: { json: normalizeToolInputSchema(tool.input_schema) }
       }
     }
     const cachePoint = toKiroCachePoint(tool.cache_control)
