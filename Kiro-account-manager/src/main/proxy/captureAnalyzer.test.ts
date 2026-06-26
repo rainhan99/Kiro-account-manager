@@ -31,10 +31,10 @@ test('totals: cache hit rate and byModel', () => {
   assert.equal(r.totals.requests, 2)
   assert.equal(r.totals.cacheReadTokens, 4000)
   assert.equal(r.totals.cacheCreateTokens, 4000)
-  // freshInput = sum(inputTokens) - cacheRead = 18000 - 4000 = 14000
-  assert.equal(r.totals.freshInputTokens, 14000)
-  // hitRate = read / (read + create + fresh) = 4000 / (4000+4000+14000) = 0.1818...
-  assert.ok(Math.abs(r.totals.cacheHitRate - 4000 / 22000) < 1e-9)
+  // inputTokens 为含缓存全量，freshInput = sum(inputTokens) - cacheRead - cacheCreate = 18000 - 4000 - 4000 = 10000
+  assert.equal(r.totals.freshInputTokens, 10000)
+  // hitRate = read / (read + create + fresh) = 4000 / (4000+4000+10000) = 4000/18000
+  assert.ok(Math.abs(r.totals.cacheHitRate - 4000 / 18000) < 1e-9)
   assert.equal(r.totals.byModel['claude-sonnet-4-6'].requests, 2)
   assert.equal(r.totals.byModel['claude-sonnet-4-6'].cacheReadTokens, 4000)
 })

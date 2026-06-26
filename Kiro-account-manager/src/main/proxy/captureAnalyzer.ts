@@ -167,7 +167,9 @@ export function analyzeCaptures(entries: CaptureEntry[], win: AnalyzeWindow): Ca
     byModel[m].cacheReadTokens += u.cacheReadTokens
     byModel[m].cacheCreateTokens += u.cacheWriteTokens
   }
-  const freshInputTokens = Math.max(0, sumInput - cacheReadTokens)
+  // inputTokens 为 Kiro 的含缓存全量计数（已含 cacheRead + cacheCreate），
+  // 故 fresh 需同时减去 cacheRead 与 cacheCreate；denom 此时等于 sumInput。
+  const freshInputTokens = Math.max(0, sumInput - cacheReadTokens - cacheCreateTokens)
   const denom = cacheReadTokens + cacheCreateTokens + freshInputTokens
   const cacheHitRate = denom ? cacheReadTokens / denom : 0
 
