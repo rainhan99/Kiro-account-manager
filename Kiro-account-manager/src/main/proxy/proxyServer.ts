@@ -3651,7 +3651,8 @@ export class ProxyServer {
   /** 开始抓包：针对单个 apiKeyId，落盘到 dir。返回 captureId。 */
   startCapture(opts: { apiKeyId: string; durationMs: number; dir: string; maxCount?: number; maxBytes?: number }): { captureId: string } {
     if (this.capture?.active) throw new Error('已有抓包进行中')
-    const captureId = `cap-${opts.dir.split(/[\\/]/).pop()}`
+    // captureId = dir 的 basename（调用方已命名为 cap-<ts>）；不要再加前缀，否则与目录/状态不一致
+    const captureId = opts.dir.split(/[\\/]/).pop() || `cap-${Date.now()}`
     const now = Date.now()
     this.capture = {
       active: true, captureId, apiKeyId: opts.apiKeyId, dir: opts.dir,
