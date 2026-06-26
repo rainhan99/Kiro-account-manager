@@ -1482,7 +1482,12 @@ export function ProxyPanel() {
       <ProxyCaptureDialog
         open={showCaptureDialog}
         onOpenChange={setShowCaptureDialog}
-        apiKeys={(config.apiKeys || []).map(k => ({ id: k.id, name: k.name }))}
+        apiKeys={[
+          { id: '__all__', name: isEn ? 'All traffic' : '全部流量' },
+          // 老式单 key（config.apiKey）无 id，用 __legacy__ 占位，后端按此标识抓取
+          ...(config.apiKey ? [{ id: '__legacy__', name: isEn ? 'Primary Key (legacy)' : '主 Key (默认)' }] : []),
+          ...(config.apiKeys || []).map(k => ({ id: k.id, name: k.name }))
+        ]}
         isEn={isEn}
       />
 

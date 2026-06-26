@@ -261,6 +261,10 @@ function safeJson(s: string): unknown {
   try { return JSON.parse(s) } catch { return {} }
 }
 
+// 抓包目标 key 的特殊标识：老式单 key 流量无 apiKey.id，统一用此 id；'__all__' 表示抓全部流量
+export const LEGACY_API_KEY_ID = '__legacy__'
+export const CAPTURE_ALL_KEY_ID = '__all__'
+
 export class ProxyServer {
   private server: http.Server | https.Server | null = null
   private fallbackServer: http.Server | null = null  // HTTPS 启用时同时监听 HTTP（可选）
@@ -1535,7 +1539,7 @@ export class ProxyServer {
 
   // 验证 API Key 并返回匹配的 Key（用于统计）
   // P0-3 使用 timingSafeEqual 防止时序攻击逐字猜 Key
-  private validateApiKey(req: http.IncomingMessage): { valid: boolean; apiKey?: import('./types').ApiKey; reason?: string } {
+  private validateApiKey(req: http.IncomingMessage): { valid: boolean; apiKey?: import('./types').ApiKey; reason?: string; legacy?: boolean } {
     // 如果没有配置任何 API Key，则跳过验证
     const hasApiKeys = this.config.apiKeys && this.config.apiKeys.length > 0
     const hasLegacyKey = !!this.config.apiKey
@@ -1577,7 +1581,7 @@ export class ProxyServer {
 
     // 兼容旧的单 API Key（常数时间比较）
     if (hasLegacyKey && this.safeStringEq(this.config.apiKey!, providedKey)) {
-      return { valid: true }
+      return { valid: true, legacy: true }
     }
 
     return { valid: false }
@@ -1857,6 +1861,8 @@ export class ProxyServer {
         }
         // 将匹配的 API Key 存储到请求对象中，用于后续统计
         ;(req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey = authResult.apiKey
+        // 抓包用 key id：多 key 用其 id；老式单 key 无 id，用 LEGACY_API_KEY_ID，否则无法被按 key 抓包
+        ;(req as unknown as { captureKeyId?: string }).captureKeyId = authResult.apiKey?.id ?? (authResult.legacy ? LEGACY_API_KEY_ID : undefined)
 
         // P1-7 按 API Key（或匿名时按 IP）请求限流
         const rateLimitId = authResult.apiKey?.id || `ip:${clientIP || 'unknown'}`
@@ -1882,7 +1888,7 @@ export class ProxyServer {
       // 把来源 IP 注入 AsyncLocalStorage，供下游 recordRequest 记录（含流式回调、handleApiError 等无 req 处）
       // clientIP 规范化：去掉 IPv4-mapped IPv6 前缀 ::ffff:
       const normalizedClientIP = clientIP.startsWith('::ffff:') ? clientIP.slice(7) : clientIP
-      const ctxApiKeyId = (req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey?.id
+      const ctxApiKeyId = (req as unknown as { captureKeyId?: string }).captureKeyId
       await this.requestContext.run({ clientIP: normalizedClientIP, apiKeyId: ctxApiKeyId }, async () => {
       if (pathWithoutQuery === '/v1/models' || pathWithoutQuery === '/models') {
         await this.handleModels(res, controller.signal)
@@ -3682,7 +3688,8 @@ export class ProxyServer {
     try {
       const store = this.requestContext.getStore()
       const apiKeyId = store?.apiKeyId
-      if (apiKeyId !== c.apiKeyId) return
+      // '__all__' 抓全部流量；否则只抓目标 key（老式单 key 流量 apiKeyId 为 LEGACY_API_KEY_ID）
+      if (c.apiKeyId !== CAPTURE_ALL_KEY_ID && apiKeyId !== c.apiKeyId) return
       if (Date.now() > c.expiresAt) return // 到点未停时兜底跳过；实际停由 index.ts timer
       if (c.count >= c.maxCount || c.bytes >= c.maxBytes) { this.stopCapture('limit'); return }
       const body = store?.rawBody ?? ''
