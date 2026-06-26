@@ -59,6 +59,23 @@ test('breaker: system block changed between consecutive misses', () => {
   assert.notEqual(b.detail.prevSha, b.detail.curSha)
 })
 
+test('breaker: system blocks count changed uses dedicated count fields', () => {
+  const prev = sysBody(['AAA', 'BBB', 'CCC']) // 3 块
+  const cur = sysBody(['AAA', 'BBB'])          // 2 块
+  const r = analyzeCaptures([
+    mk(1, 'S1', { cacheWriteTokens: 100 }, prev),
+    mk(2, 'S1', { cacheReadTokens: 0 }, cur),   // 未命中
+  ], { captureId: 'c1', apiKeyId: 'k1', startedAt: 0, endedAt: 100, stoppedReason: 'manual' })
+  assert.equal(r.breakers.length, 1)
+  const b = r.breakers[0]
+  assert.equal(b.reason, 'system_blocks_count_changed')
+  assert.equal(b.detail.prevBlockCount, 3)
+  assert.equal(b.detail.curBlockCount, 2)
+  // SHA 字段在块数变化场景下不应被借用
+  assert.equal(b.detail.prevSha, undefined)
+  assert.equal(b.detail.curSha, undefined)
+})
+
 test('breaker: tools changed', () => {
   const prev = sysBody(['AAA'], [{ name: 't1' }])
   const cur = sysBody(['AAA'], [{ name: 't2' }])

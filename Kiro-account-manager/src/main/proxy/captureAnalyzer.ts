@@ -39,7 +39,7 @@ export interface CacheBreaker {
   prevSeq: number
   curSeq: number
   reason: 'system_block_changed' | 'system_blocks_count_changed' | 'tools_changed' | 'cache_control_moved' | 'unknown'
-  detail: { changedBlockIndex?: number; prevSha?: string; curSha?: string; snippet?: string }
+  detail: { changedBlockIndex?: number; prevSha?: string; curSha?: string; prevBlockCount?: number; curBlockCount?: number; snippet?: string }
 }
 
 export interface CaptureReport {
@@ -114,7 +114,7 @@ function detectBreaker(sessionKey: string, prev: CaptureEntry, cur: CaptureEntry
   const cb = systemBlocks(cur.body)
   const base = { sessionKey, prevSeq: prev.meta.seq, curSeq: cur.meta.seq }
   if (pb.length !== cb.length) {
-    return { ...base, reason: 'system_blocks_count_changed', detail: { prevSha: String(pb.length), curSha: String(cb.length) } }
+    return { ...base, reason: 'system_blocks_count_changed', detail: { prevBlockCount: pb.length, curBlockCount: cb.length } }
   }
   for (let i = 0; i < pb.length; i++) {
     const ps = sha12(pb[i].text), cs = sha12(cb[i].text)
@@ -172,11 +172,13 @@ export function analyzeCaptures(entries: CaptureEntry[], win: AnalyzeWindow): Ca
   const cacheHitRate = denom ? cacheReadTokens / denom : 0
 
   const breakers: CacheBreaker[] = []
-  for (const list of groups.values()) {
+  // 从每个会话的第二个请求开始两两相邻 diff：会话的首个请求（以及只有单个请求的会话）
+  // 没有同会话的前序请求可对比，故有意不产出 breaker。
+  for (const [sessionKey, list] of groups) {
     for (let i = 1; i < list.length; i++) {
       const prev = list[i - 1], cur = list[i]
       if (cur.meta.usage.cacheReadTokens === 0) {
-        breakers.push(detectBreaker(keyOf(cur), prev, cur))
+        breakers.push(detectBreaker(sessionKey, prev, cur))
       }
     }
   }
