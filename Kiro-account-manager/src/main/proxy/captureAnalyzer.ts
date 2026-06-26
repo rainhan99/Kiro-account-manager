@@ -101,19 +101,29 @@ export function analyzeCaptures(entries: CaptureEntry[], win: AnalyzeWindow): Ca
     })
   }
 
+  let cacheReadTokens = 0, cacheCreateTokens = 0, sumInput = 0, credits = 0
+  const byModel: Record<string, { requests: number; cacheReadTokens: number; cacheCreateTokens: number }> = {}
+  for (const e of sorted) {
+    const u = e.meta.usage
+    cacheReadTokens += u.cacheReadTokens
+    cacheCreateTokens += u.cacheWriteTokens
+    sumInput += u.inputTokens
+    credits += u.credits
+    const m = e.meta.model || 'unknown'
+    if (!byModel[m]) byModel[m] = { requests: 0, cacheReadTokens: 0, cacheCreateTokens: 0 }
+    byModel[m].requests += 1
+    byModel[m].cacheReadTokens += u.cacheReadTokens
+    byModel[m].cacheCreateTokens += u.cacheWriteTokens
+  }
+  const freshInputTokens = Math.max(0, sumInput - cacheReadTokens)
+  const denom = cacheReadTokens + cacheCreateTokens + freshInputTokens
+  const cacheHitRate = denom ? cacheReadTokens / denom : 0
+
   return {
     captureId: win.captureId,
     apiKeyId: win.apiKeyId,
     window: { startedAt: win.startedAt, endedAt: win.endedAt, stoppedReason: win.stoppedReason },
-    totals: {
-      requests: sorted.length,
-      cacheReadTokens: 0,
-      cacheCreateTokens: 0,
-      freshInputTokens: 0,
-      cacheHitRate: 0,
-      credits: 0,
-      byModel: {}
-    },
+    totals: { requests: sorted.length, cacheReadTokens, cacheCreateTokens, freshInputTokens, cacheHitRate, credits, byModel },
     sessions,
     breakers: [],
     configWarnings: []

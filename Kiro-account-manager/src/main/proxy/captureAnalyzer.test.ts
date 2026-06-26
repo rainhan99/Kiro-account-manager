@@ -22,3 +22,19 @@ test('groups requests by sessionKey', () => {
   assert.equal(s1.requests, 2)
   assert.deepEqual(s1.requestSeqs, [1, 2])
 })
+
+test('totals: cache hit rate and byModel', () => {
+  const r = analyzeCaptures([
+    mk(1, 'S1', { inputTokens: 9000, cacheWriteTokens: 4000, credits: 0.04 }),       // 创建
+    mk(2, 'S1', { inputTokens: 9000, cacheReadTokens: 4000, credits: 0.02 }),        // 命中
+  ], { captureId: 'c1', apiKeyId: 'k1', startedAt: 0, endedAt: 100, stoppedReason: 'manual' })
+  assert.equal(r.totals.requests, 2)
+  assert.equal(r.totals.cacheReadTokens, 4000)
+  assert.equal(r.totals.cacheCreateTokens, 4000)
+  // freshInput = sum(inputTokens) - cacheRead = 18000 - 4000 = 14000
+  assert.equal(r.totals.freshInputTokens, 14000)
+  // hitRate = read / (read + create + fresh) = 4000 / (4000+4000+14000) = 0.1818...
+  assert.ok(Math.abs(r.totals.cacheHitRate - 4000 / 22000) < 1e-9)
+  assert.equal(r.totals.byModel['claude-sonnet-4-6'].requests, 2)
+  assert.equal(r.totals.byModel['claude-sonnet-4-6'].cacheReadTokens, 4000)
+})
