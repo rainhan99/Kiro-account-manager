@@ -688,6 +688,15 @@ interface KiroApi {
   // 监听反代响应事件
   onProxyResponse: (callback: (info: { path: string; model?: string; status: number; tokens?: number; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number; credits?: number; responseTime?: number; error?: string; clientIP?: string }) => void) => () => void
 
+  // 代理抓包 + 缓存命中分析
+  proxyCaptureStart: (opts: { apiKeyId: string; durationMs: number }) => Promise<{ success: boolean; captureId?: string; error?: string }>
+  proxyCaptureStop: () => Promise<{ success: boolean; captureId?: string; count?: number }>
+  proxyCaptureStatus: () => Promise<unknown>
+  proxyCaptureReport: (captureId: string) => Promise<unknown>
+  proxyCaptureList: () => Promise<{ captureId: string; requests: number }[]>
+  proxyCaptureDeleteBodies: (captureId: string) => Promise<{ success: boolean }>
+  onProxyCaptureStopped: (callback: (info: { captureId: string; reason: string }) => void) => () => void
+
   // 监听反代错误事件
   onProxyError: (callback: (error: string) => void) => () => void
 

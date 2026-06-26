@@ -2,6 +2,7 @@
 import http from 'http'
 import https from 'https'
 import fs from 'fs'
+import path from 'path'
 import crypto from 'crypto'
 import { AsyncLocalStorage } from 'async_hooks'
 import { v4 as uuidv4 } from 'uuid'
@@ -40,7 +41,7 @@ import { loadSteeringDocuments, formatSteeringForPrompt, type SteeringDocument }
 
 export interface ProxyServerEvents {
   onRequest?: (info: { path: string; method: string; accountId?: string }) => void
-  onResponse?: (info: { path: string; model?: string; status: number; tokens?: number; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number; credits?: number; responseTime?: number; error?: string; clientIP?: string }) => void
+  onResponse?: (info: { path: string; model?: string; status: number; tokens?: number; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number; credits?: number; responseTime?: number; error?: string; clientIP?: string; accountId?: string }) => void
   onError?: (error: Error) => void
   onConfigChanged?: (config: ProxyConfig) => void  // API Key 用量更新时触发
   onStatusChange?: (running: boolean, port: number) => void
@@ -256,6 +257,14 @@ class BodyTooLargeError extends Error {
   }
 }
 
+function safeJson(s: string): unknown {
+  try { return JSON.parse(s) } catch { return {} }
+}
+
+// 抓包目标 key 的特殊标识：老式单 key 流量无 apiKey.id，统一用此 id；'__all__' 表示抓全部流量
+export const LEGACY_API_KEY_ID = '__legacy__'
+export const CAPTURE_ALL_KEY_ID = '__all__'
+
 export class ProxyServer {
   private server: http.Server | https.Server | null = null
   private fallbackServer: http.Server | null = null  // HTTPS 启用时同时监听 HTTP（可选）
@@ -274,7 +283,21 @@ export class ProxyServer {
   /** P1-8 会话粘性：session hint → accountId 的映射（10 分钟 TTL） */
   private sessionAffinity: Map<string, { accountId: string; lastAt: number }> = new Map()
   /** 每请求上下文：把来源 IP 透传到 recordRequest（避免逐个 handler 穿参，且并发安全） */
-  private requestContext: AsyncLocalStorage<{ clientIP: string }> = new AsyncLocalStorage()
+  private requestContext: AsyncLocalStorage<{ clientIP: string; apiKeyId?: string; rawBody?: string; sessionKey?: string; betaHeader?: string }> = new AsyncLocalStorage()
+  /** 抓包会话状态（进程内单例；不持久化，重启失效） */
+  private capture: {
+    active: boolean
+    captureId: string
+    apiKeyId: string
+    dir: string
+    startedAt: number
+    expiresAt: number
+    count: number
+    bytes: number
+    maxCount: number
+    maxBytes: number
+    stoppedReason?: 'manual' | 'timeout' | 'limit'
+  } | null = null
   /** P2-17 审计日志（最近 200 条） */
   private auditLog: Array<{ ts: number; type: string; data: Record<string, unknown> }> = []
   /** Webhook 触发回调（由外部注入，避免 main → renderer 循环依赖） */
@@ -1516,7 +1539,7 @@ export class ProxyServer {
 
   // 验证 API Key 并返回匹配的 Key（用于统计）
   // P0-3 使用 timingSafeEqual 防止时序攻击逐字猜 Key
-  private validateApiKey(req: http.IncomingMessage): { valid: boolean; apiKey?: import('./types').ApiKey; reason?: string } {
+  private validateApiKey(req: http.IncomingMessage): { valid: boolean; apiKey?: import('./types').ApiKey; reason?: string; legacy?: boolean } {
     // 如果没有配置任何 API Key，则跳过验证
     const hasApiKeys = this.config.apiKeys && this.config.apiKeys.length > 0
     const hasLegacyKey = !!this.config.apiKey
@@ -1558,7 +1581,7 @@ export class ProxyServer {
 
     // 兼容旧的单 API Key（常数时间比较）
     if (hasLegacyKey && this.safeStringEq(this.config.apiKey!, providedKey)) {
-      return { valid: true }
+      return { valid: true, legacy: true }
     }
 
     return { valid: false }
@@ -1838,6 +1861,8 @@ export class ProxyServer {
         }
         // 将匹配的 API Key 存储到请求对象中，用于后续统计
         ;(req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey = authResult.apiKey
+        // 抓包用 key id：多 key 用其 id；老式单 key 无 id，用 LEGACY_API_KEY_ID，否则无法被按 key 抓包
+        ;(req as unknown as { captureKeyId?: string }).captureKeyId = authResult.apiKey?.id ?? (authResult.legacy ? LEGACY_API_KEY_ID : undefined)
 
         // P1-7 按 API Key（或匿名时按 IP）请求限流
         const rateLimitId = authResult.apiKey?.id || `ip:${clientIP || 'unknown'}`
@@ -1863,7 +1888,11 @@ export class ProxyServer {
       // 把来源 IP 注入 AsyncLocalStorage，供下游 recordRequest 记录（含流式回调、handleApiError 等无 req 处）
       // clientIP 规范化：去掉 IPv4-mapped IPv6 前缀 ::ffff:
       const normalizedClientIP = clientIP.startsWith('::ffff:') ? clientIP.slice(7) : clientIP
-      await this.requestContext.run({ clientIP: normalizedClientIP }, async () => {
+      const ctxApiKeyId = (req as unknown as { captureKeyId?: string }).captureKeyId
+      // 会话 key 在此刻（有真实请求头，如 x-claude-code-session-id）解析；响应阶段头已不可回取
+      const ctxSessionKey = ProxyServer.extractSessionHint(req, {})
+      const ctxBetaHeader = (req.headers['anthropic-beta'] as string) || undefined
+      await this.requestContext.run({ clientIP: normalizedClientIP, apiKeyId: ctxApiKeyId, sessionKey: ctxSessionKey, betaHeader: ctxBetaHeader }, async () => {
       if (pathWithoutQuery === '/v1/models' || pathWithoutQuery === '/models') {
         await this.handleModels(res, controller.signal)
       } else if (pathWithoutQuery === '/v1/chat/completions' || pathWithoutQuery === '/chat/completions') {
@@ -2599,7 +2628,7 @@ export class ProxyServer {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(response))
         const respTime = Date.now() - startTime
-        this.emitResponse({ path: '/v1/chat/completions', model: request.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, reasoningTokens: result.usage.reasoningTokens, credits: result.usage.credits, responseTime: respTime })
+        this.emitResponse({ path: '/v1/chat/completions', model: request.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, reasoningTokens: result.usage.reasoningTokens, credits: result.usage.credits, responseTime: respTime, accountId: usedAccount.id })
         this.recordRequest({ path: '/v1/chat/completions', model: request.model, accountId: usedAccount.id, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, credits: result.usage.credits, responseTime: respTime, success: true })
         // 记录 API Key 用量
         if (matchedApiKey) {
@@ -2716,7 +2745,7 @@ export class ProxyServer {
         this.stats.outputTokens += result.usage.outputTokens
         this.accountPool.recordSuccess(usedAccount.id, result.usage.inputTokens + result.usage.outputTokens)
         const respTime = Date.now() - startTime
-        this.emitResponse({ path: '/v1/responses', model: chatRequest.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, reasoningTokens: result.usage.reasoningTokens, credits: result.usage.credits, responseTime: respTime })
+        this.emitResponse({ path: '/v1/responses', model: chatRequest.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, reasoningTokens: result.usage.reasoningTokens, credits: result.usage.credits, responseTime: respTime, accountId: usedAccount.id })
         this.recordRequest({ path: '/v1/responses', model: chatRequest.model, accountId: usedAccount.id, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, credits: result.usage.credits, responseTime: respTime, success: true })
         if (matchedApiKey) {
           this.recordApiKeyUsage(matchedApiKey.id, result.usage.credits || 0, result.usage.inputTokens, result.usage.outputTokens, chatRequest.model, '/v1/responses')
@@ -2746,7 +2775,7 @@ export class ProxyServer {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(response))
       const respTime = Date.now() - startTime
-      this.emitResponse({ path: '/v1/responses', model: chatRequest.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, reasoningTokens: result.usage.reasoningTokens, credits: result.usage.credits, responseTime: respTime })
+      this.emitResponse({ path: '/v1/responses', model: chatRequest.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, reasoningTokens: result.usage.reasoningTokens, credits: result.usage.credits, responseTime: respTime, accountId: usedAccount.id })
       this.recordRequest({ path: '/v1/responses', model: chatRequest.model, accountId: usedAccount.id, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, credits: result.usage.credits, responseTime: respTime, success: true })
       if (matchedApiKey) {
         this.recordApiKeyUsage(matchedApiKey.id, result.usage.credits || 0, result.usage.inputTokens, result.usage.outputTokens, chatRequest.model, '/v1/responses')
@@ -2847,7 +2876,7 @@ export class ProxyServer {
           this.events.onTokensUpdate?.(this.stats.inputTokens, this.stats.outputTokens)
           this.accountPool.recordSuccess(account.id, usage.inputTokens + usage.outputTokens)
           const oaiRespTime = Date.now() - startTime
-          this.emitResponse({ path: '/v1/chat/completions', model, status: 200, tokens: usage.inputTokens + usage.outputTokens, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: usage.cacheReadTokens, reasoningTokens: usage.reasoningTokens, credits: usage.credits, responseTime: oaiRespTime })
+          this.emitResponse({ path: '/v1/chat/completions', model, status: 200, tokens: usage.inputTokens + usage.outputTokens, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: usage.cacheReadTokens, reasoningTokens: usage.reasoningTokens, credits: usage.credits, responseTime: oaiRespTime, accountId: account.id })
           this.recordRequest({ path: '/v1/chat/completions', model, accountId: account.id, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, credits: usage.credits, responseTime: oaiRespTime, success: true })
           // 记录 API Key 用量
           if (matchedApiKey) {
@@ -3045,7 +3074,7 @@ export class ProxyServer {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(response))
         const respTime = Date.now() - startTime
-        this.emitResponse({ path: '/v1/messages', model: request.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, reasoningTokens: result.usage.reasoningTokens, credits: result.usage.credits, responseTime: respTime })
+        this.emitResponse({ path: '/v1/messages', model: request.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, reasoningTokens: result.usage.reasoningTokens, credits: result.usage.credits, responseTime: respTime, accountId: usedAccount.id })
         this.recordRequest({ path: '/v1/messages', model: request.model, accountId: usedAccount.id, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, credits: result.usage.credits, responseTime: respTime, success: true })
       }
     } catch (error) {
@@ -3275,7 +3304,7 @@ export class ProxyServer {
           this.stats.cacheWriteTokens += usage.cacheWriteTokens || simulatedCacheUsage?.cacheCreationInputTokens || 0
           this.stats.reasoningTokens += usage.reasoningTokens || 0
           const respTime = Date.now() - startTime
-          this.emitResponse({ path: '/v1/messages', model, status: 200, tokens: usage.inputTokens + usage.outputTokens, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: usage.cacheReadTokens || simulatedCacheUsage?.cacheReadInputTokens, reasoningTokens: usage.reasoningTokens, credits: usage.credits, responseTime: respTime })
+          this.emitResponse({ path: '/v1/messages', model, status: 200, tokens: usage.inputTokens + usage.outputTokens, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: usage.cacheReadTokens || simulatedCacheUsage?.cacheReadInputTokens, reasoningTokens: usage.reasoningTokens, credits: usage.credits, responseTime: respTime, accountId: account.id })
           this.recordRequest({ path: '/v1/messages', model, accountId: account.id, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, credits: usage.credits, responseTime: respTime, success: true })
           // 记录 API Key 用量
           if (matchedApiKey) {
@@ -3382,6 +3411,10 @@ export class ProxyServer {
       return Promise.reject(new BodyTooLargeError(declaredLen, maxBytes))
     }
 
+    // 在同步入口（仍处于 run() 的 ALS 上下文内）抓住 store 引用：
+    // socket 的 'end' 事件由连接层 I/O 触发，回调里 getStore() 已脱离上下文会返回 undefined，
+    // 故必须用闭包带住 store，否则抓包落盘的 body 永远为空。
+    const ctxStore = this.requestContext.getStore()
     return new Promise((resolve, reject) => {
       const chunks: Buffer[] = []
       let total = 0
@@ -3404,7 +3437,9 @@ export class ProxyServer {
       }
       const onEnd = () => {
         cleanup()
-        resolve(Buffer.concat(chunks, total).toString('utf8'))
+        const bodyStr = Buffer.concat(chunks, total).toString('utf8')
+        if (ctxStore) ctxStore.rawBody = bodyStr
+        resolve(bodyStr)
       }
       const onError = (error: Error) => {
         cleanup()
@@ -3625,9 +3660,78 @@ export class ProxyServer {
     return lines.join('\n') + '\n'
   }
 
+  /** 开始抓包：针对单个 apiKeyId，落盘到 dir。返回 captureId。 */
+  startCapture(opts: { apiKeyId: string; durationMs: number; dir: string; maxCount?: number; maxBytes?: number }): { captureId: string } {
+    if (this.capture?.active) throw new Error('已有抓包进行中')
+    // captureId = dir 的 basename（调用方已命名为 cap-<ts>）；不要再加前缀，否则与目录/状态不一致
+    const captureId = opts.dir.split(/[\\/]/).pop() || `cap-${Date.now()}`
+    const now = Date.now()
+    this.capture = {
+      active: true, captureId, apiKeyId: opts.apiKeyId, dir: opts.dir,
+      startedAt: now, expiresAt: now + opts.durationMs, count: 0, bytes: 0,
+      maxCount: opts.maxCount ?? 2000, maxBytes: opts.maxBytes ?? 500 * 1024 * 1024
+    }
+    try { fs.mkdirSync(opts.dir, { recursive: true }) } catch { /* ignore */ }
+    return { captureId }
+  }
+
+  stopCapture(reason: 'manual' | 'timeout' | 'limit'): { captureId: string; count: number } | null {
+    if (!this.capture) return null
+    this.capture.active = false
+    this.capture.stoppedReason = reason
+    const out = { captureId: this.capture.captureId, count: this.capture.count }
+    return out
+  }
+
+  getCaptureStatus(): typeof this.capture {
+    return this.capture
+  }
+
+  /** 在 emitResponse 内调用：命中目标 key 则落盘 body + meta。绝不抛错。 */
+  private captureIfActive(info: Parameters<NonNullable<ProxyServerEvents['onResponse']>>[0]): void {
+    const c = this.capture
+    if (!c || !c.active) return
+    try {
+      const store = this.requestContext.getStore()
+      const apiKeyId = store?.apiKeyId
+      // '__all__' 抓全部流量；否则只抓目标 key（老式单 key 流量 apiKeyId 为 LEGACY_API_KEY_ID）
+      if (c.apiKeyId !== CAPTURE_ALL_KEY_ID && apiKeyId !== c.apiKeyId) return
+      if (Date.now() > c.expiresAt) return // 到点未停时兜底跳过；实际停由 index.ts timer
+      if (c.count >= c.maxCount || c.bytes >= c.maxBytes) { this.stopCapture('limit'); return }
+      const body = store?.rawBody ?? ''
+      const seq = c.count + 1
+      // 优先用 run() 时由真实请求头解析好的 sessionKey（含 x-claude-code-session-id）；
+      // 拿不到时用 body 字段兜底
+      const sessionKey = store?.sessionKey
+        || ProxyServer.extractSessionHint({ headers: {} } as unknown as http.IncomingMessage, body ? safeJson(body) : {})
+      const meta = {
+        seq, ts: Date.now(), path: info.path, model: info.model, clientIP: info.clientIP, status: info.status,
+        sessionKey,
+        accountId: info.accountId,
+        betaHeader: store?.betaHeader,
+        usage: {
+          inputTokens: info.inputTokens || 0,
+          outputTokens: info.outputTokens || 0,
+          cacheReadTokens: info.cacheReadTokens || 0,
+          cacheWriteTokens: info.cacheWriteTokens || 0,
+          credits: info.credits || 0
+        }
+      }
+      const base = path.join(c.dir, `req-${String(seq).padStart(4, '0')}`)
+      fs.writeFileSync(`${base}.json`, body)
+      fs.writeFileSync(`${base}.meta.json`, JSON.stringify(meta))
+      c.count = seq
+      c.bytes += Buffer.byteLength(body)
+    } catch (e) {
+      proxyLogger.warn('ProxyServer', `capture write failed: ${(e as Error).message}`)
+    }
+  }
+
   // onResponse 统一出口：自动注入当前请求的来源 IP（来自 AsyncLocalStorage），供 UI 实时日志展示
   private emitResponse(info: Parameters<NonNullable<ProxyServerEvents['onResponse']>>[0]): void {
-    this.events.onResponse?.({ ...info, clientIP: info.clientIP ?? this.requestContext.getStore()?.clientIP })
+    const withIp = { ...info, clientIP: info.clientIP ?? this.requestContext.getStore()?.clientIP }
+    this.events.onResponse?.(withIp)
+    this.captureIfActive(withIp)
   }
 
   // 记录请求到 recentRequests

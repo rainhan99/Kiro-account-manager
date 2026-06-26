@@ -799,6 +799,21 @@ const api = {
     }
   },
 
+  // 代理抓包 + 缓存命中分析
+  proxyCaptureStart: (opts: { apiKeyId: string; durationMs: number }): Promise<{ success: boolean; captureId?: string; error?: string }> =>
+    ipcRenderer.invoke('proxy-capture-start', opts),
+  proxyCaptureStop: (): Promise<{ success: boolean; captureId?: string; count?: number }> =>
+    ipcRenderer.invoke('proxy-capture-stop'),
+  proxyCaptureStatus: (): Promise<unknown> => ipcRenderer.invoke('proxy-capture-status'),
+  proxyCaptureReport: (captureId: string): Promise<unknown> => ipcRenderer.invoke('proxy-capture-report', { captureId }),
+  proxyCaptureList: (): Promise<{ captureId: string; requests: number }[]> => ipcRenderer.invoke('proxy-capture-list'),
+  proxyCaptureDeleteBodies: (captureId: string): Promise<{ success: boolean }> => ipcRenderer.invoke('proxy-capture-delete-bodies', { captureId }),
+  onProxyCaptureStopped: (callback: (info: { captureId: string; reason: string }) => void): (() => void) => {
+    const handler = (_e: unknown, info: { captureId: string; reason: string }): void => callback(info)
+    ipcRenderer.on('proxy-capture-stopped', handler as never)
+    return () => ipcRenderer.removeListener('proxy-capture-stopped', handler as never)
+  },
+
   // 监听反代错误事件
   onProxyError: (callback: (error: string) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, error: string): void => {
