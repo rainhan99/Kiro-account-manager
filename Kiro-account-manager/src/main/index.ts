@@ -298,12 +298,27 @@ let proxyServer: ProxyServer | null = null
 let captureTimer: NodeJS.Timeout | null = null
 
 async function buildCaptureReport(captureId: string): Promise<unknown> {
-  const dir = path.join(app.getPath('userData'), 'captures', captureId)
+  // 路径净化：captureId 来自渲染进程，防目录穿越；只接受 cap- 前缀
+  const safeId = path.basename(String(captureId))
+  if (!safeId.startsWith('cap-')) return analyzeCaptures([], {
+    captureId: safeId,
+    apiKeyId: '',
+    startedAt: 0,
+    endedAt: Date.now(),
+    stoppedReason: 'manual'
+  })
+  const dir = path.join(app.getPath('userData'), 'captures', safeId)
   const files = await fsp.readdir(dir).catch(() => [] as string[])
   const metaFiles = files.filter((f) => f.endsWith('.meta.json')).sort()
   const entries: CaptureEntry[] = []
   for (const mf of metaFiles) {
-    const meta = JSON.parse(await fsp.readFile(path.join(dir, mf), 'utf8'))
+    // meta 写入非原子，截断/损坏的单个文件不应拖垮整份报告
+    let meta: CaptureEntry['meta']
+    try {
+      meta = JSON.parse(await fsp.readFile(path.join(dir, mf), 'utf8'))
+    } catch {
+      continue
+    }
     const bodyFile = mf.replace('.meta.json', '.json')
     let body: unknown = {}
     try {
@@ -315,7 +330,7 @@ async function buildCaptureReport(captureId: string): Promise<unknown> {
   }
   const st = proxyServer?.getCaptureStatus?.()
   return analyzeCaptures(entries, {
-    captureId,
+    captureId: safeId,
     apiKeyId: st?.apiKeyId || '',
     startedAt: st?.startedAt || 0,
     endedAt: Date.now(),
@@ -6707,9 +6722,12 @@ app.whenReady().then(async () => {
       proxyServer.startCapture({ apiKeyId: opts.apiKeyId, durationMs: opts.durationMs, dir })
       clearCaptureTimer()
       captureTimer = setTimeout(() => {
-        proxyServer?.stopCapture('timeout')
+        // 后端可能已经走 'limit' 路径自停，避免再发一个假的 timeout
+        if (proxyServer?.getCaptureStatus?.()?.active) {
+          proxyServer?.stopCapture('timeout')
+          mainWindow?.webContents.send('proxy-capture-stopped', { captureId, reason: 'timeout' })
+        }
         clearCaptureTimer()
-        mainWindow?.webContents.send('proxy-capture-stopped', { captureId, reason: 'timeout' })
       }, opts.durationMs)
       return { success: true, captureId }
     } catch (e) {
@@ -6743,7 +6761,10 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('proxy-capture-delete-bodies', async (_e, { captureId }: { captureId: string }) => {
-    const dir = path.join(app.getPath('userData'), 'captures', captureId)
+    // 路径净化：防目录穿越；只接受 cap- 前缀
+    const safeId = path.basename(String(captureId))
+    if (!safeId.startsWith('cap-')) return { success: false }
+    const dir = path.join(app.getPath('userData'), 'captures', safeId)
     const files = await fsp.readdir(dir).catch(() => [] as string[])
     for (const f of files) {
       if (f.endsWith('.json') && !f.endsWith('.meta.json')) {
