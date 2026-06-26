@@ -303,6 +303,14 @@ export function openAIChatToResponsesResponse(
   return responsesResponse
 }
 
+// 剥离 Claude Code 注入的 x-anthropic-billing-header 行。
+// 它是 Anthropic 计费/遥测标签（cc_version 构建哈希 / cch nonce / cc_is_subagent），对 Kiro/Bedrock 无意义，
+// 但位于 system 最前面且每请求变化，会打掉 Kiro 缓存前缀。仅删该行，保留其余 system 内容。
+// 注：原始请求体在抓包中已完整保留（剥离只发生在转发 Kiro 的转换链路），归因不丢。
+function stripBillingHeader(text: string): string {
+  return text.replace(/^\s*x-anthropic-billing-header:[^\n]*\r?\n?/i, '')
+}
+
 // ============ OpenAI -> Kiro 转换 ============
 
 export function openaiToKiro(
@@ -336,6 +344,7 @@ export function openaiToKiro(
       nonSystemMessages.push(msg)
     }
   }
+  systemPrompt = stripBillingHeader(systemPrompt)
 
   // 注入时间戳
   const timestamp = new Date().toISOString()
@@ -829,6 +838,7 @@ export function claudeToKiro(
       return b.text
     }).join('\n')
   }
+  systemPrompt = stripBillingHeader(systemPrompt)
 
   // 注入时间戳
   const timestamp = new Date().toISOString()
