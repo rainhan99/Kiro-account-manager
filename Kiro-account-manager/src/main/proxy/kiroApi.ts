@@ -1550,8 +1550,15 @@ async function parseEventStream(
     if (i === -1) return false
     return !s.slice(i).includes('</invoke>')
   }
+  // 另一套泄漏格式：<tool_use id="..." name="...">JSON</tool_use>（与请求侧 formatToolUses 同格式，
+  // 子代理/历史含未声明工具时模型会照学输出，原解析器只认 <invoke> 故漏过）
+  const hasOpenToolUse = (s: string): boolean => {
+    const i = s.lastIndexOf('<tool_use')
+    if (i === -1) return false
+    return !s.slice(i).includes('</tool_use>')
+  }
   const pendingToolTail = (s: string): number => {
-    const markers = ['<function_calls>', '<invoke name=', '</invoke>', '</function_calls>', '<parameter name=', '</parameter>', 'count']
+    const markers = ['<function_calls>', '<invoke name=', '</invoke>', '</function_calls>', '<parameter name=', '</parameter>', '<tool_use', '</tool_use>', 'count']
     let hold = 0
     for (const tag of markers) {
       for (let k = Math.min(s.length, tag.length - 1); k >= 1; k--) {
@@ -1604,15 +1611,47 @@ async function parseEventStream(
       if (fcClose) consumedEnd += fcClose[0].length
       leakCarry = leakCarry.slice(consumedEnd)
     }
-    if (hasOpenInvoke(leakCarry)) {
+    // 提取所有已闭合的 <tool_use id="..." name="...">JSON</tool_use>
+    for (;;) {
+      const ti = leakCarry.indexOf('<tool_use')
+      if (ti === -1) break
+      const ci = leakCarry.indexOf('</tool_use>', ti)
+      if (ci === -1) break // 未闭合，等更多帧
+      const gt = leakCarry.indexOf('>', ti)
+      if (gt === -1 || gt > ci) break // 开标签尚未闭合，等更多帧
+      await emit(stripToolPrefix(leakCarry.slice(0, ti)))
+      const block = leakCarry.slice(ti, ci + '</tool_use>'.length)
+      const nameM = block.match(/<tool_use\b[^>]*\bname="([^"]+)"/)
+      const bodyM = block.match(/<tool_use\b[^>]*>([\s\S]*?)<\/tool_use>/)
+      if (nameM) {
+        let input: Record<string, unknown> = {}
+        const raw = ((bodyM && bodyM[1]) || '').trim()
+        try {
+          const parsed = JSON.parse(raw)
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) input = parsed as Record<string, unknown>
+        } catch { /* 非 JSON 体保留空 input，仍救回工具名 */ }
+        leakedTools.push({ name: nameM[1], input })
+        if (toolLeakDebug) {
+          try { console.log('[tool-leak-fix] parsed leaked <tool_use>:', nameM[1], raw.slice(0, 120)) } catch { /* ignore */ }
+        }
+      }
+      leakCarry = leakCarry.slice(ci + '</tool_use>'.length)
+    }
+    // 未闭合的 <invoke> 或 <tool_use>：保留从最早的开标签起，等下一帧
+    let openAt = -1
+    if (hasOpenInvoke(leakCarry)) openAt = leakCarry.indexOf('<invoke name=')
+    if (hasOpenToolUse(leakCarry)) {
+      const t = leakCarry.indexOf('<tool_use')
+      openAt = openAt === -1 ? t : Math.min(openAt, t)
+    }
+    if (openAt !== -1) {
       if (isFlush) {
         // 流结束仍未闭合 = 损坏的工具调用，原样当文本输出（不丢字符）
         await emit(leakCarry)
         leakCarry = ''
         return
       }
-      const oi = leakCarry.indexOf('<invoke name=')
-      const safe = stripToolPrefix(leakCarry.slice(0, oi))
+      const safe = stripToolPrefix(leakCarry.slice(0, openAt))
       await emit(safe)
       leakCarry = leakCarry.slice(safe.length)
       return
