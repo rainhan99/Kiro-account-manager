@@ -311,6 +311,16 @@ function stripBillingHeader(text: string): string {
   return text.replace(/^\s*x-anthropic-billing-header:[^\n]*\r?\n?/i, '')
 }
 
+// 把当前时间注入到「当前消息」（最后一条 user 消息）而非 system prompt。
+// 背景：Bedrock/Kiro 是前缀缓存（tools → system → messages）。system prompt 是被缓存的大前缀块，
+// 若把每请求都变的时间戳贴在它最前面，会让 system 块指纹每次都变、连带其后的全部对话历史都无法命中，
+// 命中率被死死压在「仅 tools 命中」那一档（实测 ~43%）。当前消息是最新一轮内容、本就不参与前缀缓存，
+// 在这里注入时间戳零缓存代价，模型也仍能感知当前时间。
+function prependTimeContext(content: string): string {
+  const timestamp = new Date().toISOString()
+  return `[Context: Current time is ${timestamp}]\n\n${content}`
+}
+
 // ============ OpenAI -> Kiro 转换 ============
 
 export function openaiToKiro(
@@ -345,10 +355,6 @@ export function openaiToKiro(
     }
   }
   systemPrompt = stripBillingHeader(systemPrompt)
-
-  // 注入时间戳
-  const timestamp = new Date().toISOString()
-  systemPrompt = `[Context: Current time is ${timestamp}]\n\n${systemPrompt}`
 
   // 注入执行导向指令（防止 AI 在探索过程中丢失目标）
   const executionDirective = `
@@ -520,7 +526,7 @@ export function openaiToKiro(
     ]
     history.unshift(...systemMessages)
   }
-  const finalContent = currentContent || 'Continue.'
+  const finalContent = prependTimeContext(currentContent || 'Continue.')
 
   // 转换工具定义
   const kiroTools = convertOpenAITools(request.tools, toolNameRegistry)
@@ -840,10 +846,6 @@ export function claudeToKiro(
   }
   systemPrompt = stripBillingHeader(systemPrompt)
 
-  // 注入时间戳
-  const timestamp = new Date().toISOString()
-  systemPrompt = `[Context: Current time is ${timestamp}]\n\n${systemPrompt}`
-
   // 注入执行导向指令（防止 AI 在探索过程中丢失目标）
   const executionDirective = `
 <execution_discipline>
@@ -1014,7 +1016,7 @@ export function claudeToKiro(
     ]
     history.unshift(...systemMessages)
   }
-  const finalContent = currentContent || (currentToolResults.length > 0 ? 'Tool results provided.' : 'Continue')
+  const finalContent = prependTimeContext(currentContent || (currentToolResults.length > 0 ? 'Tool results provided.' : 'Continue'))
 
   // 转换工具定义
   const kiroTools = convertClaudeTools(request.tools, toolNameRegistry)
