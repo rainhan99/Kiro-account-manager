@@ -5,6 +5,7 @@ import { ProxySecurityPanel } from './ProxySecurityPanel'
 import { useAccountsStore } from '../../store/accounts'
 import { useTranslation } from '../../hooks/useTranslation'
 import { ProxyLogsDialog } from './ProxyLogsDialog'
+import { ProxyCaptureDialog } from './ProxyCaptureDialog'
 import { ProxyDetailedLogsDialog } from './ProxyDetailedLogsDialog'
 import { ModelsDialog } from './ModelsDialog'
 import { ModelMappingDialog } from './ModelMappingDialog'
@@ -163,6 +164,7 @@ export function ProxyPanel() {
   const [syncSuccess, setSyncSuccess] = useState(false)
   const [refreshSuccess, setRefreshSuccess] = useState(false)
   const [showLogsDialog, setShowLogsDialog] = useState(false)
+  const [showCaptureDialog, setShowCaptureDialog] = useState(false)
   const [showDetailedLogsDialog, setShowDetailedLogsDialog] = useState(false)
   const [showModelsDialog, setShowModelsDialog] = useState(false)
   const [showClientConfigDialog, setShowClientConfigDialog] = useState(false)
@@ -1381,6 +1383,9 @@ export function ProxyPanel() {
                   <Activity className="h-3 w-3 mr-1" />
                   {isEn ? 'Detailed Logs' : '详细日志'}
                 </Button>
+                <Button variant="outline" size="sm" onClick={() => setShowCaptureDialog(true)}>
+                  {isEn ? 'Capture' : '抓包分析'}
+                </Button>
               </div>
             </div>
           </CardHeader>
@@ -1471,6 +1476,13 @@ export function ProxyPanel() {
           await window.api.proxyResetTokens()
           fetchStatus()
         }}
+        isEn={isEn}
+      />
+
+      <ProxyCaptureDialog
+        open={showCaptureDialog}
+        onOpenChange={setShowCaptureDialog}
+        apiKeys={(config.apiKeys || []).map(k => ({ id: k.id, name: k.name }))}
         isEn={isEn}
       />
 
