@@ -181,6 +181,32 @@ export function analyzeCaptures(entries: CaptureEntry[], win: AnalyzeWindow): Ca
     }
   }
 
+  const configWarnings: string[] = []
+  // 1) cache_control 打在内容反复变的块上
+  for (const [sk, list] of groups) {
+    if (list.length < 2) continue
+    const ccBlockShaSets = new Map<number, Set<string>>()
+    for (const e of list) {
+      systemBlocks(e.body).forEach((bk, i) => {
+        if (!bk.hasCC) return
+        if (!ccBlockShaSets.has(i)) ccBlockShaSets.set(i, new Set())
+        ccBlockShaSets.get(i)!.add(sha12(bk.text))
+      })
+    }
+    for (const [i, shas] of ccBlockShaSets) {
+      if (shas.size > 1) configWarnings.push(`会话 ${sk}: system[${i}] 带 cache_control 但内容反复变化（${shas.size} 种），缓存标记打在了会变的块上`)
+    }
+  }
+  // 2) 大 system 但完全无 cache_control
+  for (const e of sorted) {
+    const blocks = systemBlocks(e.body)
+    const totalChars = blocks.reduce((n, b) => n + b.text.length, 0)
+    const anyCC = blocks.some(b => b.hasCC)
+    if (totalChars > 4000 && !anyCC) {
+      configWarnings.push(`req#${e.meta.seq}: system 约 ${totalChars} 字符但未启用 cache_control，无法命中缓存`)
+    }
+  }
+
   return {
     captureId: win.captureId,
     apiKeyId: win.apiKeyId,
@@ -188,6 +214,6 @@ export function analyzeCaptures(entries: CaptureEntry[], win: AnalyzeWindow): Ca
     totals: { requests: sorted.length, cacheReadTokens, cacheCreateTokens, freshInputTokens, cacheHitRate, credits, byModel },
     sessions,
     breakers,
-    configWarnings: []
+    configWarnings
   }
 }

@@ -68,3 +68,20 @@ test('breaker: tools changed', () => {
   ], { captureId: 'c1', apiKeyId: 'k1', startedAt: 0, endedAt: 100, stoppedReason: 'manual' })
   assert.equal(r.breakers[0].reason, 'tools_changed')
 })
+
+test('configWarnings: cache_control on a block whose content keeps changing', () => {
+  // 同会话 system[0] 内容每次变，却带 cache_control
+  const r = analyzeCaptures([
+    mk(1, 'S1', { cacheWriteTokens: 1 }, sysBody(['v1-AAAAAAAAAAAAAAAAAAAA'])),
+    mk(2, 'S1', { cacheReadTokens: 0 }, sysBody(['v2-BBBBBBBBBBBBBBBBBBBB'])),
+  ], { captureId: 'c1', apiKeyId: 'k1', startedAt: 0, endedAt: 100, stoppedReason: 'manual' })
+  assert.ok(r.configWarnings.some(w => w.includes('cache_control') && w.includes('S1')))
+})
+
+test('configWarnings: large system without cache_control', () => {
+  const big = 'x'.repeat(6000) // 远超 cacheable 阈值的字符量
+  const body = { system: [{ type: 'text', text: big }], messages: [{ role: 'user', content: 'hi' }] }
+  const r = analyzeCaptures([mk(1, 'S2', {}, body)],
+    { captureId: 'c1', apiKeyId: 'k1', startedAt: 0, endedAt: 100, stoppedReason: 'manual' })
+  assert.ok(r.configWarnings.some(w => w.includes('未启用') || w.includes('cache_control')))
+})
