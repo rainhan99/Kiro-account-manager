@@ -634,12 +634,17 @@ export interface ProxyStats {
   recentRequests: RequestLog[]
 }
 
-// 单维度的聚合明细（用于命中率统计）
-export interface DimensionStat {
-  /** 维度键值（apiKey id / clientIP / model 名） */
-  key: string
-  /** 展示名（API Key 显示其 name，IP/模型显示原值） */
-  label?: string
+// 维度组合明细单元：一条 (API Key × 接入 IP × 模型) 组合的聚合指标。
+// 前端按需过滤 + 分组聚合，实现任意维度交叉查看。
+export interface DimensionCell {
+  /** API Key id（多 key 用 id，老式单 key 为 LEGACY_API_KEY_ID） */
+  apiKeyId: string
+  /** API Key 展示名（取 config.apiKeys 里的 name；老式单 key 显示"默认 Key"） */
+  apiKeyLabel?: string
+  /** 接入来源 IP（socket 远端地址） */
+  clientIP: string
+  /** 请求模型 */
+  model: string
   requests: number
   successRequests: number
   failedRequests: number
@@ -653,11 +658,9 @@ export interface DimensionStat {
   lastUsed: number
 }
 
-// 三个维度的聚合表：键 → DimensionStat
+// 维度统计：组合明细单元数组。前端按 apiKey/clientIP/model 任意过滤再分组聚合。
 export interface DimensionStats {
-  byApiKey: Record<string, DimensionStat>
-  byClientIP: Record<string, DimensionStat>
-  byModel: Record<string, DimensionStat>
+  cells: DimensionCell[]
 }
 
 export interface AccountStats {

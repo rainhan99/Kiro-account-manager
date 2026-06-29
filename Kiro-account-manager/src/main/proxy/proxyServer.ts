@@ -16,7 +16,7 @@ import type {
   ClaudeCacheControl,
   ProxyConfig,
   ProxyStats,
-  DimensionStat,
+  DimensionCell,
   ProxyAccount,
   TokenRefreshCallback
 } from './types'
@@ -265,6 +265,8 @@ function safeJson(s: string): unknown {
 // 抓包目标 key 的特殊标识：老式单 key 流量无 apiKey.id，统一用此 id；'__all__' 表示抓全部流量
 export const LEGACY_API_KEY_ID = '__legacy__'
 export const CAPTURE_ALL_KEY_ID = '__all__'
+/** 维度统计组合单元上限（API Key × IP × 模型），超出后淘汰最久未用，防高基数撑爆内存 */
+const MAX_DIMENSION_CELLS = 5000
 
 export class ProxyServer {
   private server: http.Server | https.Server | null = null
@@ -273,6 +275,8 @@ export class ProxyServer {
   private config: ProxyConfig
   private stats: ProxyStats
   private sessionStats: { totalRequests: number; successRequests: number; failedRequests: number; startTime: number }
+  /** 维度统计：(API Key × 接入 IP × 模型) 组合单元，Map 复合键 O(1) 查找。getStats() 时转数组对外 */
+  private dimensionCells: Map<string, DimensionCell> = new Map()
   private events: ProxyServerEvents
   private refreshingTokens: Map<string, Promise<boolean>> = new Map() // 在途刷新去重（并发方共享同一结果）
   private isHttps: boolean = false
@@ -381,7 +385,7 @@ export class ProxyServer {
       accountStats: new Map(),
       endpointStats: new Map(),
       modelStats: new Map(),
-      dimensionStats: { byApiKey: {}, byClientIP: {}, byModel: {} },
+      dimensionStats: { cells: [] },
       recentRequests: []
     }
     this.sessionStats = {
@@ -858,7 +862,7 @@ export class ProxyServer {
       accountStats: this.stats.accountStats,
       endpointStats: this.stats.endpointStats,
       modelStats: this.stats.modelStats,
-      dimensionStats: this.stats.dimensionStats,
+      dimensionStats: { cells: Array.from(this.dimensionCells.values()) },
       recentRequests: this.stats.recentRequests
     }
   }
@@ -3848,54 +3852,75 @@ export class ProxyServer {
   }
 
   /**
-   * 维度统计聚合：在 emitResponse 内对每个响应按三个维度累加。
-   * - byApiKey：apiKeyId（多 key 用 id，老式单 key 为 LEGACY_API_KEY_ID）
-   * - byClientIP：socket 来源 IP
-   * - byModel：请求模型
+   * 维度统计聚合：在 emitResponse 内对每个响应按 (API Key × 接入 IP × 模型) 组合累加。
+   * 用 Map 做 O(1) 复合键查找/插入，与组合单元总数无关，热路径恒定常数时间。
    * 缓存命中率 = cacheReadTokens / (inputTokens + cacheReadTokens + cacheWriteTokens)，由 UI 计算。
+   * 到达 MAX_DIMENSION_CELLS 上限后，新组合归入按模型聚合的 __overflow__ 桶，
+   * 避免高基数（大量不同 IP）撑爆内存，且不做 O(N) 淘汰扫描。
    */
   private recordDimensionStats(
     info: Parameters<NonNullable<ProxyServerEvents['onResponse']>>[0],
     apiKeyId?: string
   ): void {
     const success = info.status >= 200 && info.status < 300
-    const accumulate = (table: Record<string, DimensionStat>, key: string | undefined, label?: string): void => {
-      if (!key) return
-      let stat = table[key]
-      if (!stat) {
-        stat = {
-          key,
-          label,
-          requests: 0,
-          successRequests: 0,
-          failedRequests: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-          credits: 0,
-          lastUsed: 0
+    const apiKeyKey = apiKeyId || 'anonymous'
+    const clientIP = info.clientIP || 'unknown'
+    const model = info.model || 'unknown'
+
+    const cells = this.dimensionCells
+    // 复合键：用   分隔，避免各字段内容碰撞
+    const mapKey = `${apiKeyKey} ${clientIP} ${model}`
+    let cell = cells.get(mapKey)
+
+    if (!cell) {
+      if (cells.size >= MAX_DIMENSION_CELLS) {
+        // 超上限：新组合归入按模型聚合的溢出桶，不再新增独立单元
+        const overflowKey = `__overflow__ - ${model}`
+        cell = cells.get(overflowKey)
+        if (!cell) {
+          cell = this.newDimensionCell('__overflow__', '其他(超上限)', '-', model)
+          cells.set(overflowKey, cell)
         }
-        table[key] = stat
+      } else {
+        const apiKeyLabel = apiKeyId
+          ? (apiKeyId === LEGACY_API_KEY_ID ? '默认 Key' : this.config.apiKeys?.find(k => k.id === apiKeyId)?.name)
+          : undefined
+        cell = this.newDimensionCell(apiKeyKey, apiKeyLabel, clientIP, model)
+        cells.set(mapKey, cell)
       }
-      if (label) stat.label = label
-      stat.requests++
-      if (success) stat.successRequests++
-      else stat.failedRequests++
-      stat.inputTokens += info.inputTokens || 0
-      stat.outputTokens += info.outputTokens || 0
-      stat.cacheReadTokens += info.cacheReadTokens || 0
-      stat.cacheWriteTokens += info.cacheWriteTokens || 0
-      stat.credits += info.credits || 0
-      stat.lastUsed = Date.now()
+    } else if (apiKeyId && apiKeyId !== LEGACY_API_KEY_ID) {
+      // API Key 改名后刷新展示名
+      const name = this.config.apiKeys?.find(k => k.id === apiKeyId)?.name
+      if (name) cell.apiKeyLabel = name
     }
 
-    const keyLabel = apiKeyId
-      ? (apiKeyId === LEGACY_API_KEY_ID ? '默认 Key' : this.config.apiKeys?.find(k => k.id === apiKeyId)?.name)
-      : undefined
-    accumulate(this.stats.dimensionStats.byApiKey, apiKeyId, keyLabel)
-    accumulate(this.stats.dimensionStats.byClientIP, info.clientIP || undefined)
-    accumulate(this.stats.dimensionStats.byModel, info.model || undefined)
+    cell.requests++
+    if (success) cell.successRequests++
+    else cell.failedRequests++
+    cell.inputTokens += info.inputTokens || 0
+    cell.outputTokens += info.outputTokens || 0
+    cell.cacheReadTokens += info.cacheReadTokens || 0
+    cell.cacheWriteTokens += info.cacheWriteTokens || 0
+    cell.credits += info.credits || 0
+    cell.lastUsed = Date.now()
+  }
+
+  private newDimensionCell(apiKeyId: string, apiKeyLabel: string | undefined, clientIP: string, model: string): DimensionCell {
+    return {
+      apiKeyId,
+      apiKeyLabel,
+      clientIP,
+      model,
+      requests: 0,
+      successRequests: 0,
+      failedRequests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      credits: 0,
+      lastUsed: 0
+    }
   }
 
   // 记录请求到 recentRequests
