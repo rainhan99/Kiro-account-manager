@@ -32,6 +32,10 @@ interface ApiKey {
   createdAt: number
   lastUsedAt?: number
   creditsLimit?: number
+  usageAlertThreshold?: number
+  allowedModels?: string[]
+  qpmLimit?: number
+  tpmLimit?: number
   usage: {
     totalRequests: number
     totalCredits: number
@@ -66,6 +70,10 @@ export function ApiKeyManager() {
   const [showKeys, setShowKeys] = useState<Set<string>>(new Set())
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [showUsageDialog, setShowUsageDialog] = useState(false)
+  // 可用模型列表（用于白名单填写提示）
+  const [modelHints, setModelHints] = useState<string[]>([])
+  // 模型白名单文本编辑缓冲（每行/逗号分隔一个 pattern）
+  const [allowedModelsText, setAllowedModelsText] = useState('')
 
   const loadApiKeys = useCallback(async () => {
     try {
@@ -83,6 +91,22 @@ export function ApiKeyManager() {
   useEffect(() => {
     loadApiKeys()
   }, [loadApiKeys])
+
+  // 拉取可用模型列表，作为白名单填写提示
+  useEffect(() => {
+    window.api.proxyGetModels().then(r => {
+      if (r.success && Array.isArray(r.models)) setModelHints(r.models.map(m => m.id))
+    }).catch(() => { /* 忽略，提示非必需 */ })
+  }, [])
+
+  // 通用：更新选中 Key 的某个字段并本地同步
+  const updateKeyField = useCallback(async (id: string, updates: Record<string, unknown>) => {
+    const result = await window.api.proxyUpdateApiKey(id, updates)
+    if (result.success) {
+      setApiKeys(prev => prev.map(k => k.id === id ? { ...k, ...updates } as ApiKey : k))
+    }
+    return result
+  }, [])
 
   const handleAddKey = async () => {
     if (!newKeyName.trim()) return
@@ -170,6 +194,11 @@ export function ApiKeyManager() {
   }
 
   const selectedKeyData = apiKeys.find(k => k.id === selectedKey)
+
+  // 选中 Key 变化时，把模型白名单同步到编辑缓冲
+  useEffect(() => {
+    setAllowedModelsText((selectedKeyData?.allowedModels || []).join('\n'))
+  }, [selectedKey, selectedKeyData?.allowedModels])
 
   if (loading) {
     return (
@@ -377,6 +406,96 @@ export function ApiKeyManager() {
                   className="w-32 h-8"
                 />
                 <span className="text-xs text-muted-foreground">{isEn ? '(0 = unlimited)' : '(0 = 无限制)'}</span>
+              </div>
+
+              {/* 用量报警阈值（针对本 key 的 Credits 额度） */}
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-muted-foreground">{isEn ? 'Usage Alert:' : '用量报警阈值:'}</span>
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={5}
+                  placeholder="90"
+                  value={selectedKeyData.usageAlertThreshold != null ? Math.round(selectedKeyData.usageAlertThreshold * 100) : ''}
+                  onChange={async (e) => {
+                    const pct = e.target.value ? Math.max(0, Math.min(100, parseInt(e.target.value))) : null
+                    await updateKeyField(selectedKeyData.id, { usageAlertThreshold: pct != null ? pct / 100 : null })
+                  }}
+                  className="w-24 h-8"
+                />
+                <span className="text-xs text-muted-foreground">{isEn ? '% of credits limit (0 = off). Needs credits limit set.' : '% 额度（0 = 关闭）。需先设额度限制'}</span>
+              </div>
+
+              {/* QPM / TPM 限制 */}
+              <div className="flex items-center gap-4 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-muted-foreground">{isEn ? 'QPM Limit:' : 'QPM 限制:'}</span>
+                  <Input
+                    type="number"
+                    min={0}
+                    placeholder={isEn ? 'Unlimited' : '无限制'}
+                    value={selectedKeyData.qpmLimit || ''}
+                    onChange={async (e) => {
+                      const v = e.target.value ? parseInt(e.target.value) : 0
+                      await updateKeyField(selectedKeyData.id, { qpmLimit: v > 0 ? v : null })
+                    }}
+                    className="w-28 h-8"
+                  />
+                  <span className="text-xs text-muted-foreground">{isEn ? 'req/min' : '次/分'}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-muted-foreground">{isEn ? 'TPM Limit:' : 'TPM 限制:'}</span>
+                  <Input
+                    type="number"
+                    min={0}
+                    step={1000}
+                    placeholder={isEn ? 'Unlimited' : '无限制'}
+                    value={selectedKeyData.tpmLimit || ''}
+                    onChange={async (e) => {
+                      const v = e.target.value ? parseInt(e.target.value) : 0
+                      await updateKeyField(selectedKeyData.id, { tpmLimit: v > 0 ? v : null })
+                    }}
+                    className="w-32 h-8"
+                  />
+                  <span className="text-xs text-muted-foreground">{isEn ? 'tokens/min (in+out)' : 'token/分（入+出）'}</span>
+                </div>
+              </div>
+
+              {/* 模型白名单 */}
+              <div className="space-y-1">
+                <span className="text-sm text-muted-foreground">{isEn ? 'Allowed Models (whitelist)' : '允许使用的模型（白名单）'}</span>
+                <textarea
+                  value={allowedModelsText}
+                  onChange={(e) => setAllowedModelsText(e.target.value)}
+                  onBlur={async () => {
+                    const list = allowedModelsText.split(/[\n,]/).map(s => s.trim()).filter(Boolean)
+                    await updateKeyField(selectedKeyData.id, { allowedModels: list.length > 0 ? list : null })
+                  }}
+                  placeholder={isEn
+                    ? 'One pattern per line, supports * wildcard (e.g. claude-*). Empty = all models allowed.'
+                    : '每行一个，支持 * 通配符（如 claude-*）。留空 = 允许所有模型'}
+                  className="w-full h-20 px-3 py-2 text-xs font-mono rounded-md border border-input bg-background"
+                />
+                {modelHints.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {modelHints.slice(0, 12).map(m => (
+                      <button
+                        key={m}
+                        type="button"
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary hover:bg-primary/20"
+                        onClick={() => {
+                          const cur = allowedModelsText.split(/[\n,]/).map(s => s.trim()).filter(Boolean)
+                          if (cur.includes(m)) return
+                          setAllowedModelsText([...cur, m].join('\n'))
+                        }}
+                        title={isEn ? 'Click to add' : '点击添加'}
+                      >
+                        + {m}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="text-xs text-muted-foreground space-y-1">
                 <div className="flex items-center gap-2">

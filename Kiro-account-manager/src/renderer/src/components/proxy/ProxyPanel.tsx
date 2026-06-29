@@ -103,9 +103,6 @@ interface ProxyConfig {
   enableMetrics?: boolean
   fallbackPort?: number
   enableAuditLog?: boolean
-  usageAlertThreshold?: number
-  accountPoolAlertMode?: 'off' | 'each' | 'threshold'
-  accountPoolAlertThreshold?: number
 }
 
 // 反代请求日志：模块级持久化 + 单次订阅，避免切到其它页面 unmount 后日志清空、中间请求事件丢失

@@ -19,12 +19,6 @@ interface ProxyConfigSecurity {
   enableMetrics?: boolean
   fallbackPort?: number
   enableAuditLog?: boolean
-  /** API Key 用量报警阈值（0-1，默认 0.9）。0 = 关闭 */
-  usageAlertThreshold?: number
-  /** 账号池报警模式 */
-  accountPoolAlertMode?: 'off' | 'each' | 'threshold'
-  /** 账号池可用占比报警阈值（0-1，默认 0.1） */
-  accountPoolAlertThreshold?: number
   tls?: { enabled?: boolean; cert?: string; key?: string; certPath?: string; keyPath?: string }
 }
 
@@ -222,62 +216,7 @@ export function ProxySecurityPanel({ config, setConfig, isRunning, isEn }: Proxy
             </div>
           </div>
 
-          {/* 用量报警阈值 */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label className="text-xs">{isEn ? 'Usage alert threshold (%)' : '用量报警阈值（%）'}</Label>
-              <Input
-                type="number"
-                min={0}
-                max={100}
-                step={5}
-                value={Math.round(((config.usageAlertThreshold ?? 0.9) * 100))}
-                onChange={(e) => {
-                  const pct = Math.max(0, Math.min(100, parseInt(e.target.value) || 0))
-                  updateConfig('usageAlertThreshold', pct / 100)
-                }}
-                placeholder="90"
-                className="h-9"
-              />
-              <p className="text-xs text-muted-foreground mt-1">{isEn ? 'Webhook fires when a Key reaches this % of its credits limit. 0 = off. Subscribe the "Usage threshold" event.' : 'API Key 用量达到额度上限此百分比时推送 webhook（需订阅"用量达到阈值"事件）。0 = 关闭'}</p>
-            </div>
-          </div>
-
-          {/* 账号池报警 */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label className="text-xs">{isEn ? 'Account pool alert mode' : '账号池报警模式'}</Label>
-              <select
-                value={config.accountPoolAlertMode ?? 'threshold'}
-                onChange={(e) => updateConfig('accountPoolAlertMode', e.target.value as 'off' | 'each' | 'threshold')}
-                className="w-full h-9 px-3 text-sm rounded-md border border-input bg-background"
-              >
-                <option value="off">{isEn ? 'Off' : '关闭'}</option>
-                <option value="each">{isEn ? 'Each account (on quota exhausted)' : '每个账号都通知（配额耗尽时）'}</option>
-                <option value="threshold">{isEn ? 'Only when available pool is low' : '可用账号低于阈值才通知'}</option>
-              </select>
-              <p className="text-xs text-muted-foreground mt-1">{isEn ? 'Subscribe the "Account pool alert" webhook event.' : '需订阅"账号池配额报警"事件'}</p>
-            </div>
-            <div>
-              <Label className="text-xs">{isEn ? 'Pool low threshold (% available)' : '可用账号报警阈值（%）'}</Label>
-              <Input
-                type="number"
-                min={0}
-                max={100}
-                step={5}
-                value={Math.round(((config.accountPoolAlertThreshold ?? 0.1) * 100))}
-                onChange={(e) => {
-                  const pct = Math.max(0, Math.min(100, parseInt(e.target.value) || 0))
-                  updateConfig('accountPoolAlertThreshold', pct / 100)
-                }}
-                placeholder="10"
-                disabled={(config.accountPoolAlertMode ?? 'threshold') !== 'threshold'}
-                className="h-9"
-              />
-              <p className="text-xs text-muted-foreground mt-1">{isEn ? 'e.g. 10 accounts + 10% → alert when only 1 left available.' : '例：10 个账号、10% → 仅剩 1 个可用时报警'}</p>
-            </div>
-          </div>
-
+          {/* IP 访问控制 */}
           {/* IP 访问控制 */}
           <div className="grid grid-cols-2 gap-3">
             <div>

@@ -17,6 +17,8 @@ interface AccountData {
   autoSwitchEnabled?: boolean
   autoSwitchThreshold?: number
   autoSwitchInterval?: number
+  accountUsageAlertThreshold?: number
+  accountPoolAlertThreshold?: number
   switchTarget?: 'ide' | 'cli' | 'both'
   theme?: string
   darkMode?: boolean

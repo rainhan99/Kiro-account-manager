@@ -34,6 +34,7 @@ export type WebhookEvent =
   | 'token-expired'        // Token 过期/刷新失败
   | 'usage-warning'        // API Key 用量达到阈值（默认 90%）
   | 'account-pool-warning' // 账号池配额耗尽 / 可用账号低于阈值
+  | 'account-usage-warning' // 上游账号月度额度用量达到阈值（默认 90%）
 
 export const ALL_WEBHOOK_EVENTS: { value: WebhookEvent; label: string; labelEn: string }[] = [
   { value: 'batch-completed', label: '批量任务完成', labelEn: 'Batch completed' },
@@ -43,8 +44,9 @@ export const ALL_WEBHOOK_EVENTS: { value: WebhookEvent; label: string; labelEn: 
   { value: 'register-success', label: '注册成功（单账号）', labelEn: 'Register success' },
   { value: 'register-failed', label: '注册失败（单账号）', labelEn: 'Register failed' },
   { value: 'token-expired', label: 'Token 过期/刷新失败', labelEn: 'Token expired' },
-  { value: 'usage-warning', label: '用量达到阈值（90%）', labelEn: 'Usage threshold (90%)' },
-  { value: 'account-pool-warning', label: '账号池配额报警', labelEn: 'Account pool alert' }
+  { value: 'usage-warning', label: '下游 Key 用量达到阈值（90%）', labelEn: 'API Key usage (90%)' },
+  { value: 'account-pool-warning', label: '账号池配额报警', labelEn: 'Account pool alert' },
+  { value: 'account-usage-warning', label: '上游账号额度达到阈值（90%）', labelEn: 'Account usage (90%)' }
 ]
 
 export interface WebhookMessage {

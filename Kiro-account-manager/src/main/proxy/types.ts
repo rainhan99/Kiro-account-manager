@@ -441,6 +441,17 @@ export interface ApiKey {
   // 用量报警阈值（0-1 之间的比例，默认取全局 usageAlertThreshold）。
   // 当 totalCredits / creditsLimit 达到该比例时通过 webhook 推送一次报警。
   usageAlertThreshold?: number
+  // ============ 下游使用限制（v1.8+ 新增） ============
+  /**
+   * 允许使用的模型白名单（支持通配符 *，与模型映射规则一致）。
+   * 校验下游请求的原始模型名（映射前）。空数组或未设 = 不限制。
+   * 命中不到白名单时返回 403。
+   */
+  allowedModels?: string[]
+  /** 每分钟最大请求数（QPM）。0 或未设 = 不限制；超限返回 429。 */
+  qpmLimit?: number
+  /** 每分钟最大 token 数（TPM，输入+输出累计）。0 或未设 = 不限制；预检超限返回 429。 */
+  tpmLimit?: number
   // 用量统计
   usage: {
     totalRequests: number
@@ -566,25 +577,6 @@ export interface ProxyConfig {
   fallbackPort?: number
   /** 启用审计日志（管理 API 操作、config 变更） */
   enableAuditLog?: boolean
-  /**
-   * API Key 用量报警全局阈值（0-1 之间，默认 0.9 = 90%）。
-   * 当某个 API Key 的 totalCredits / creditsLimit 达到该比例时，通过 webhook 推送一次 usage-warning 报警。
-   * 单个 Key 可用 ApiKey.usageAlertThreshold 覆盖。设为 0 或负数表示关闭用量报警。
-   */
-  usageAlertThreshold?: number
-
-  /**
-   * 账号池配额报警模式：
-   * - 'off'：关闭账号池报警
-   * - 'each'：每个账号配额耗尽（429/402）时各通知一次（按账号 ID 去重 5 分钟）
-   * - 'threshold'：可用账号占比降到 accountPoolAlertThreshold 及以下时通知一次（默认）
-   */
-  accountPoolAlertMode?: 'off' | 'each' | 'threshold'
-  /**
-   * 账号池可用占比报警阈值（0-1，默认 0.1 = 10%）。仅 accountPoolAlertMode='threshold' 时生效。
-   * 例：10 个账号、阈值 0.1，则可用账号降到 1 个（含）以下时推送。
-   */
-  accountPoolAlertThreshold?: number
 
   // ============ Agent 模式 + Steering（v1.7.5 新增） ============
   /** Agent 模式：vibe（对话优先）或 spec（计划优先）。默认 vibe */

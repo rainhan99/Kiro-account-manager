@@ -180,6 +180,10 @@ export function SettingsPage() {
     autoSwitchThreshold,
     autoSwitchInterval,
     setAutoSwitch,
+    accountUsageAlertThreshold,
+    setAccountUsageAlertThreshold,
+    accountPoolAlertThreshold,
+    setAccountPoolAlertThreshold,
     batchImportConcurrency,
     setBatchImportConcurrency,
     loginPrivateMode,
@@ -939,6 +943,60 @@ export function SettingsPage() {
               </div>
             </>
           )}
+
+          {/* 上游账号额度报警阈值（独立于自动换号，始终可设） */}
+          <div className="flex items-center justify-between pt-2 border-t">
+            <div>
+              <p className="font-medium">{isEn ? 'Usage Alert Threshold' : '额度报警阈值'}</p>
+              <p className="text-sm text-muted-foreground">
+                {isEn
+                  ? 'Send a webhook when an account reaches this % of its monthly quota (0 = off). Subscribe the "Account usage" event.'
+                  : '账号月度额度用量达到此百分比时推送 webhook（0 = 关闭）。需订阅"上游账号额度达到阈值"事件'}
+              </p>
+            </div>
+            <div className="flex items-center gap-1">
+              <input
+                type="number"
+                className="w-20 h-9 px-3 rounded-lg border bg-background text-sm text-center focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary"
+                value={Math.round((accountUsageAlertThreshold ?? 0.9) * 100)}
+                min={0}
+                max={100}
+                step={5}
+                onChange={(e) => {
+                  const pct = Math.max(0, Math.min(100, parseInt(e.target.value) || 0))
+                  setAccountUsageAlertThreshold(pct / 100)
+                }}
+              />
+              <span className="text-sm text-muted-foreground">%</span>
+            </div>
+          </div>
+
+          {/* 账号池可用占比报警阈值（主动监控可用账号数） */}
+          <div className="flex items-center justify-between pt-2 border-t">
+            <div>
+              <p className="font-medium">{isEn ? 'Account Pool Alert Threshold' : '账号池报警阈值'}</p>
+              <p className="text-sm text-muted-foreground">
+                {isEn
+                  ? 'Send a webhook when usable accounts (not banned / not quota-exhausted) drop to this % of total (0 = off). Subscribe the "Account pool alert" event.'
+                  : '可用账号（未封禁且额度未耗尽）占比降到此百分比时推送 webhook（0 = 关闭）。需订阅"账号池配额报警"事件'}
+              </p>
+            </div>
+            <div className="flex items-center gap-1">
+              <input
+                type="number"
+                className="w-20 h-9 px-3 rounded-lg border bg-background text-sm text-center focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary"
+                value={Math.round((accountPoolAlertThreshold ?? 0.1) * 100)}
+                min={0}
+                max={100}
+                step={5}
+                onChange={(e) => {
+                  const pct = Math.max(0, Math.min(100, parseInt(e.target.value) || 0))
+                  setAccountPoolAlertThreshold(pct / 100)
+                }}
+              />
+              <span className="text-sm text-muted-foreground">%</span>
+            </div>
+          </div>
         </CardContent>
       </Card>
 

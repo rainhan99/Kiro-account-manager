@@ -285,6 +285,10 @@ export class ProxyServer {
   private sockets: Set<Socket> = new Set()
   /** P1-7 按 API Key/IP 的滑动窗口限流（每分钟桶） */
   private rateLimitBuckets: Map<string, { count: number; windowStart: number }> = new Map()
+  /** 按 API Key 的 QPM 滑动窗口（60 秒桶）：keyId → 时间戳队列 */
+  private qpmBuckets: Map<string, number[]> = new Map()
+  /** 按 API Key 的 TPM 滑动窗口（60 秒）：keyId → {ts, tokens}[]，预检与累加共用 */
+  private tpmBuckets: Map<string, { ts: number; tokens: number }[]> = new Map()
   /** P1-8 会话粘性：session hint → accountId 的映射（10 分钟 TTL） */
   private sessionAffinity: Map<string, { accountId: string; lastAt: number }> = new Map()
   /** 每请求上下文：把来源 IP 透传到 recordRequest（避免逐个 handler 穿参，且并发安全） */
@@ -1481,10 +1485,7 @@ export class ProxyServer {
         // 402/429: 额度耗尽，切换端点或账号
         if (errMsg.includes('402') || errMsg.includes('429') || errMsg.includes('quota') || errMsg.includes('ThrottlingException') || errMsg.includes('reached the limit') || errMsg.includes('ServiceQuotaExceededException') || errMsg.includes('limit exceeded') || errMsg.includes('rate limit')) {
           console.log('[ProxyServer] Quota/throttle error, switching endpoint or account')
-          const newlyExhausted = this.accountPool.recordError(currentAccount.id, ErrorType.RECOVERABLE, 429)
-          if (newlyExhausted) {
-            this.notifyAccountQuotaExhausted(currentAccount, _path)
-          }
+          this.accountPool.recordError(currentAccount.id, ErrorType.RECOVERABLE, 429)
           endpointIndex = (endpointIndex + 1) % 2 // 切换端点
           if (endpointIndex === 0) {
             // 已尝试所有端点，切换到没试过的下个账号
@@ -1764,6 +1765,9 @@ export class ProxyServer {
     // 触发配置保存事件
     this.events.onConfigChanged?.(this.config)
 
+    // TPM 滑动窗口累加（输入+输出 token），供下次预检
+    this.recordApiKeyTokens(apiKey.id, inputTokens + outputTokens)
+
     // 用量报警：totalCredits 达到 creditsLimit 的阈值（默认 90%）时推送一次 webhook
     this.checkUsageAlert(apiKey)
   }
@@ -1778,7 +1782,7 @@ export class ProxyServer {
     const limit = apiKey.creditsLimit
     if (!limit || limit <= 0) return  // 无额度上限，不报警
 
-    const threshold = apiKey.usageAlertThreshold ?? this.config.usageAlertThreshold ?? 0.9
+    const threshold = apiKey.usageAlertThreshold ?? 0.9  // 每个 key 单独设，未设默认 90%
     if (threshold <= 0) return  // 关闭报警
 
     const used = apiKey.usage.totalCredits
@@ -2583,6 +2587,15 @@ export class ProxyServer {
     }
     const affinityHintChat = request.conversation_id
 
+    // 下游 API Key 使用限制（模型白名单 + QPM + TPM 预检），用原始请求模型校验
+    const limitChat = this.checkApiKeyLimits(matchedApiKey, request.model)
+    if (!limitChat.allowed) {
+      if (limitChat.retryAfterMs) res.setHeader('Retry-After', String(Math.ceil(limitChat.retryAfterMs / 1000)))
+      this.sendError(res, limitChat.status || 429, limitChat.reason || 'Limit exceeded', 'openai')
+      this.emitResponse({ path: '/v1/chat/completions', model: request.model, status: limitChat.status || 429, error: limitChat.reason })
+      return
+    }
+
     // 应用模型映射
     request.model = this.applyModelMapping(request.model, matchedApiKey?.id)
 
@@ -2712,6 +2725,15 @@ export class ProxyServer {
       if (rawHintResp) {
         const keyPrefix = matchedApiKey?.id?.slice(0, 8) || 'default'
         affinityHintResp = `${keyPrefix}:${rawHintResp}`
+      }
+      // 下游 API Key 使用限制（用原始请求模型校验），命中限制抛错走下方 catch 统一回错
+      const limitResp = this.checkApiKeyLimits(matchedApiKey, chatRequest.model)
+      if (!limitResp.allowed) {
+        if (limitResp.retryAfterMs) res.setHeader('Retry-After', String(Math.ceil(limitResp.retryAfterMs / 1000)))
+        this.recordRequestFailed()
+        this.sendError(res, limitResp.status || 429, limitResp.reason || 'Limit exceeded', 'openai')
+        this.emitResponse({ path: '/v1/responses', model: chatRequest.model, status: limitResp.status || 429, error: limitResp.reason })
+        return
       }
       chatRequest.model = this.applyModelMapping(chatRequest.model, matchedApiKey?.id)
       processedRequest = await this.resolveOpenAIHttpImages(this.prepareOpenAIRequest(chatRequest), signal)
@@ -2973,8 +2995,7 @@ export class ProxyServer {
 
           this.recordRequestFailed()
           const errStatusCode = error.message.match(/(\d{3})/)?.[1]
-          const oaiNewlyExhausted = this.accountPool.recordError(account.id, errStatusCode ? classifyError(parseInt(errStatusCode)) : ErrorType.RECOVERABLE, errStatusCode ? parseInt(errStatusCode) : undefined)
-          if (oaiNewlyExhausted) this.notifyAccountQuotaExhausted(account, '/v1/chat/completions', model)
+          this.accountPool.recordError(account.id, errStatusCode ? classifyError(parseInt(errStatusCode)) : ErrorType.RECOVERABLE, errStatusCode ? parseInt(errStatusCode) : undefined)
           this.emitResponse({ path: '/v1/chat/completions', model, status: 500, error: error.message })
           this.recordRequest({ path: '/v1/chat/completions', model, accountId: account.id, responseTime: Date.now() - startTime, success: false, error: error.message })
           resolve()
@@ -3007,6 +3028,15 @@ export class ProxyServer {
     }
     // P1-8 会话粘性使用 conversation_id 作为粘性 key（已包含 API Key 前缀）
     const affinityHint = request.conversation_id
+
+    // 下游 API Key 使用限制（模型白名单 + QPM + TPM 预检），用原始请求模型校验
+    const limitClaude = this.checkApiKeyLimits(matchedApiKey, request.model)
+    if (!limitClaude.allowed) {
+      if (limitClaude.retryAfterMs) res.setHeader('Retry-After', String(Math.ceil(limitClaude.retryAfterMs / 1000)))
+      this.sendError(res, limitClaude.status || 429, limitClaude.reason || 'Limit exceeded', 'anthropic')
+      this.emitResponse({ path: '/v1/messages', model: request.model, status: limitClaude.status || 429, error: limitClaude.reason })
+      return
+    }
 
     // 应用模型映射
     request.model = this.applyModelMapping(request.model, matchedApiKey?.id)
@@ -3395,8 +3425,7 @@ export class ProxyServer {
 
           this.recordRequestFailed()
           const errStatusCode2 = error.message.match(/(\d{3})/)?.[1]
-          const claudeNewlyExhausted = this.accountPool.recordError(account.id, errStatusCode2 ? classifyError(parseInt(errStatusCode2)) : ErrorType.RECOVERABLE, errStatusCode2 ? parseInt(errStatusCode2) : undefined)
-          if (claudeNewlyExhausted) this.notifyAccountQuotaExhausted(account, '/v1/messages', model)
+          this.accountPool.recordError(account.id, errStatusCode2 ? classifyError(parseInt(errStatusCode2)) : ErrorType.RECOVERABLE, errStatusCode2 ? parseInt(errStatusCode2) : undefined)
           this.emitResponse({ path: '/v1/messages', model, status: 500, error: error.message })
           this.recordRequest({ path: '/v1/messages', model, accountId: account.id, responseTime: Date.now() - startTime, success: false, error: error.message })
           resolve()
@@ -3426,11 +3455,7 @@ export class ProxyServer {
     const errorType = classifyError(parsedCode)
     const isAuthError = error.message.includes('401') || error.message.includes('403') || error.message.includes('Auth')
 
-    const newlyExhausted = this.accountPool.recordError(account.id, errorType, parsedCode)
-    if (newlyExhausted) {
-      const fullAccount = this.accountPool.getAccount(account.id)
-      if (fullAccount) this.notifyAccountQuotaExhausted(fullAccount, path, model)
-    }
+    this.accountPool.recordError(account.id, errorType, parsedCode)
 
     let statusCode = parsedCode
     if (isAuthError) statusCode = 401
@@ -3589,12 +3614,83 @@ export class ProxyServer {
     return { allowed: true, retryAfterMs: 0 }
   }
 
+  /**
+   * 下游 API Key 使用限制校验（模型白名单 + QPM + TPM 预检）。
+   * 在 handler 内「模型映射前、用原始请求模型」调用。
+   * 返回 allowed=false 时携带 status(403/429) 与 reason，调用方据此回错。
+   * QPM 命中时会"占用"一个计数（滑动窗口），所以仅在确实要继续处理时调用。
+   */
+  private checkApiKeyLimits(apiKey: import('./types').ApiKey | undefined, requestedModel: string): { allowed: boolean; status?: number; reason?: string; retryAfterMs?: number } {
+    if (!apiKey) return { allowed: true }
+    const now = Date.now()
+
+    // 1) 模型白名单（支持通配符 *）
+    const allowed = apiKey.allowedModels
+    if (allowed && allowed.length > 0) {
+      const ok = allowed.some(pattern => {
+        const re = new RegExp(`^${pattern.trim().replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`, 'i')
+        return re.test(requestedModel)
+      })
+      if (!ok) {
+        return { allowed: false, status: 403, reason: `Model not allowed for this API key: ${requestedModel}` }
+      }
+    }
+
+    // 2) TPM 预检：60 秒窗口内已用 token 已达上限则直接拒绝（不占 QPM）
+    const tpmLimit = apiKey.tpmLimit || 0
+    if (tpmLimit > 0) {
+      const arr = (this.tpmBuckets.get(apiKey.id) || []).filter(e => now - e.ts < 60_000)
+      const used = arr.reduce((s, e) => s + e.tokens, 0)
+      this.tpmBuckets.set(apiKey.id, arr)
+      if (used >= tpmLimit) {
+        return { allowed: false, status: 429, reason: 'TPM limit exceeded', retryAfterMs: 60_000 }
+      }
+    }
+
+    // 3) QPM：60 秒滑动窗口
+    const qpmLimit = apiKey.qpmLimit || 0
+    if (qpmLimit > 0) {
+      const arr = (this.qpmBuckets.get(apiKey.id) || []).filter(t => now - t < 60_000)
+      if (arr.length >= qpmLimit) {
+        this.qpmBuckets.set(apiKey.id, arr)
+        return { allowed: false, status: 429, reason: 'QPM limit exceeded', retryAfterMs: 60_000 - (now - arr[0]) }
+      }
+      arr.push(now)
+      this.qpmBuckets.set(apiKey.id, arr)
+    }
+
+    return { allowed: true }
+  }
+
+  /** 记录某 API Key 本次消耗的 token 到 TPM 滑动窗口（响应成功后调用） */
+  private recordApiKeyTokens(apiKeyId: string, tokens: number): void {
+    if (!apiKeyId || tokens <= 0) return
+    const apiKey = this.config.apiKeys?.find(k => k.id === apiKeyId)
+    if (!apiKey?.tpmLimit || apiKey.tpmLimit <= 0) return  // 未设 TPM 限制则不追踪
+    const now = Date.now()
+    const arr = (this.tpmBuckets.get(apiKeyId) || []).filter(e => now - e.ts < 60_000)
+    arr.push({ ts: now, tokens })
+    this.tpmBuckets.set(apiKeyId, arr)
+  }
+
   /** 定期清理过期的限流桶 / 会话粘性条目（避免内存泄漏） */
   private cleanupExpiredCaches(): void {
     const now = Date.now()
     // 限流桶过期 2 分钟
     for (const [key, bucket] of this.rateLimitBuckets) {
       if (now - bucket.windowStart > 120_000) this.rateLimitBuckets.delete(key)
+    }
+    // QPM 桶：清掉 60 秒外的时间戳，空队列删除
+    for (const [key, arr] of this.qpmBuckets) {
+      const kept = arr.filter(t => now - t < 60_000)
+      if (kept.length === 0) this.qpmBuckets.delete(key)
+      else this.qpmBuckets.set(key, kept)
+    }
+    // TPM 桶：清掉 60 秒外的记录，空队列删除
+    for (const [key, arr] of this.tpmBuckets) {
+      const kept = arr.filter(e => now - e.ts < 60_000)
+      if (kept.length === 0) this.tpmBuckets.delete(key)
+      else this.tpmBuckets.set(key, kept)
     }
     // 粘性会话过期 10 分钟
     for (const [key, entry] of this.sessionAffinity) {
@@ -3678,63 +3774,6 @@ export class ProxyServer {
       message: `所有账号配额耗尽或冷却中（exhausted=${quota.exhausted}/${quota.total}，cooldown=${quota.cooldown}）`,
       level: 'error',
       fields: { 端点: path, 模型: model || '-', 总账号: quota.total, 配额耗尽: quota.exhausted, 冷却中: quota.cooldown, 可用: quota.available }
-    })
-  }
-
-  /**
-   * 单账号配额耗尽时的账号池报警（在 recordError 返回"新近耗尽"为 true 时调用）。
-   * 根据 config.accountPoolAlertMode 决定推送时机：
-   * - 'off'：不推送
-   * - 'each'：每个账号耗尽各推一次（按账号 ID 去重）
-   * - 'threshold'：仅当可用账号占比降到阈值（默认 10%）及以下时推一次
-   * 全员耗尽（available=0）由 notifyAllAccountsExhausted 单独处理，这里跳过避免重复。
-   */
-  private notifyAccountQuotaExhausted(account: ProxyAccount, path: string, model?: string): void {
-    const mode = this.config.accountPoolAlertMode ?? 'threshold'
-    if (mode === 'off') return
-
-    const quota = this.accountPool.getQuotaStatus()
-    // 全员不可用交给 notifyAllAccountsExhausted，这里不重复推
-    if (quota.available <= 0) return
-
-    const emailShort = account.email || account.id.slice(0, 8)
-    this.appendAuditLog('account_quota_exhausted', { accountId: account.id, email: account.email, path, model, ...quota })
-
-    if (mode === 'each') {
-      // 每个账号各推一次：事件名带账号 ID 去重
-      this.triggerWebhook(`proxy-account-quota-${account.id}`, {
-        title: '反代账号配额耗尽',
-        message: `账号 ${emailShort} 配额耗尽（429/402），已自动切换。当前可用 ${quota.available}/${quota.total}。`,
-        level: 'warn',
-        kind: 'account-pool-warning',
-        fields: { 邮箱: account.email || '-', 账号ID: account.id.slice(0, 8), 端点: path, 模型: model || '-', 可用账号: quota.available, 总账号: quota.total, 配额耗尽: quota.exhausted }
-      })
-      return
-    }
-
-    // threshold 模式：可用占比 <= 阈值才推
-    const threshold = this.config.accountPoolAlertThreshold ?? 0.1
-    if (quota.total <= 0) return
-    const availableRatio = quota.available / quota.total
-    if (availableRatio > threshold) return
-
-    const percent = Math.round(availableRatio * 100)
-    // 列出当前所有已耗尽账号（邮箱优先，无邮箱用 id 前缀），方便排查
-    const now = Date.now()
-    const exhaustedAccounts = this.accountPool.getAllAccounts()
-      .filter(a => this.accountPool.isQuotaExhausted(a, now))
-      .map(a => a.email || a.id.slice(0, 8))
-    const MAX_LIST = 20
-    const exhaustedList = exhaustedAccounts.length > MAX_LIST
-      ? `${exhaustedAccounts.slice(0, MAX_LIST).join('、')} 等 ${exhaustedAccounts.length} 个`
-      : (exhaustedAccounts.join('、') || '-')
-    // 事件名不带账号 ID：同一"低水位"窗口内只推一次（5 分钟去重）
-    this.triggerWebhook('proxy-account-pool-low', {
-      title: '反代账号池即将耗尽',
-      message: `可用账号已降至 ${quota.available}/${quota.total}（${percent}%），低于报警阈值 ${Math.round(threshold * 100)}%。最近耗尽账号：${emailShort}。`,
-      level: 'error',
-      kind: 'account-pool-warning',
-      fields: { 可用账号: quota.available, 总账号: quota.total, 可用占比: `${percent}%`, 报警阈值: `${Math.round(threshold * 100)}%`, 配额耗尽: quota.exhausted, 冷却中: quota.cooldown, 已耗尽账号: exhaustedList }
     })
   }
 

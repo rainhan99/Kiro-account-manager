@@ -293,6 +293,11 @@ interface AccountsState {
   autoSwitchThreshold: number // 余额阈值，低于此值时自动切换
   autoSwitchInterval: number // 检查间隔（分钟）
 
+  // 上游账号额度报警：用量百分比达到阈值时通过 webhook 推送（account-usage-warning 事件）
+  accountUsageAlertThreshold: number // 0-1，默认 0.9 = 90%；<=0 关闭
+  // 账号池报警：可用账号占比（未封禁且月度额度未耗尽）降到阈值时推送（account-pool-warning 事件）
+  accountPoolAlertThreshold: number // 0-1，默认 0.1 = 10%；<=0 关闭
+
   // 批量导入设置
   batchImportConcurrency: number // 批量导入并发数
 
@@ -432,6 +437,12 @@ interface AccountsActions {
   // 自动换号
   setAutoSwitch: (enabled: boolean, threshold?: number, interval?: number) => void
 
+  // 上游账号额度报警阈值（0-1，0=关闭）
+  setAccountUsageAlertThreshold: (threshold: number) => void
+
+  // 账号池可用占比报警阈值（0-1，0=关闭）
+  setAccountPoolAlertThreshold: (threshold: number) => void
+
   // 批量导入并发数
   setBatchImportConcurrency: (concurrency: number) => void
 
@@ -570,6 +581,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   autoSwitchEnabled: false,
   autoSwitchThreshold: 0,
   autoSwitchInterval: 5,
+  accountUsageAlertThreshold: 0.9,
+  accountPoolAlertThreshold: 0.1,
   batchImportConcurrency: 100,
   loginPrivateMode: false,
   switchTarget: 'ide' as const,
@@ -1529,7 +1542,16 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           return { accounts }
         })
         get().saveToStorage()
-        
+
+        // 上游账号月度额度报警（达到阈值通过 webhook 推送，按重置周期去重）
+        if (result.data.usage) {
+          checkAccountUsageAlert(
+            { id, email: result.data.email ?? account.email },
+            result.data.usage,
+            get().accountUsageAlertThreshold
+          )
+        }
+
         // 如果刷新了 token，打印日志
         if (result.data.newCredentials) {
           console.log(`[Account] Token refreshed for ${account?.email}`)
@@ -1718,6 +1740,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           autoSwitchEnabled: data.autoSwitchEnabled ?? false,
           autoSwitchThreshold: data.autoSwitchThreshold ?? 0,
           autoSwitchInterval: data.autoSwitchInterval ?? 5,
+          accountUsageAlertThreshold: data.accountUsageAlertThreshold ?? 0.9,
+          accountPoolAlertThreshold: data.accountPoolAlertThreshold ?? 0.1,
           switchTarget: data.switchTarget ?? 'ide',
           theme: data.theme ?? 'default',
           darkMode: data.darkMode ?? false,
@@ -1831,6 +1855,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       autoSwitchEnabled,
       autoSwitchThreshold,
       autoSwitchInterval,
+      accountUsageAlertThreshold,
+      accountPoolAlertThreshold,
       switchTarget,
       theme,
       darkMode,
@@ -1864,6 +1890,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           autoSwitchEnabled,
           autoSwitchThreshold,
           autoSwitchInterval,
+          accountUsageAlertThreshold,
+          accountPoolAlertThreshold,
           switchTarget,
           theme,
           darkMode,
@@ -2059,6 +2087,16 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   },
 
   // ==================== 自动换号 ====================
+
+  setAccountUsageAlertThreshold: (threshold) => {
+    set({ accountUsageAlertThreshold: Math.max(0, Math.min(1, threshold)) })
+    get().saveToStorage()
+  },
+
+  setAccountPoolAlertThreshold: (threshold) => {
+    set({ accountPoolAlertThreshold: Math.max(0, Math.min(1, threshold)) })
+    get().saveToStorage()
+  },
 
   setAutoSwitch: (enabled, threshold, interval) => {
     set({
@@ -2284,6 +2322,9 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     }
 
     console.log(`[AutoRefresh] Completed: ${successCount} success, ${failCount} failed`)
+
+    // 账号池水位主动报警（复用本轮已刷新的上游额度状态，无额外 IO）
+    checkAccountPoolAlert(get().accounts, get().accountPoolAlertThreshold)
   },
 
   // 仅刷新失效的 Token（不刷新账户信息）
@@ -3361,6 +3402,61 @@ function syncAllAccountsBoundToProxy(proxyId: string): void {
   }
 }
 
+/**
+ * 账号池水位报警去重：记录上次是否已处于"低水位报警"状态。
+ * 低于阈值时报一次，回升到阈值以上后清除，避免每轮重复推。
+ */
+let accountPoolLowAlerted = false
+
+/**
+ * 主动检测账号池可用占比，低于阈值则推送 webhook（account-pool-warning）。
+ * "可用" = 未封禁 且 月度额度未耗尽（percentUsed < 1）。
+ * 在账号信息轮询（autoRefresh）结束后调用，复用已拉取的上游额度状态，无额外 IO。
+ */
+function checkAccountPoolAlert(
+  accounts: Map<string, Account>,
+  threshold: number
+): void {
+  if (threshold <= 0) return // 关闭
+  const total = accounts.size
+  if (total <= 0) return
+
+  const usable: string[] = []
+  const unusable: string[] = []
+  for (const [, acc] of accounts) {
+    const banned = isBannedAccountError(acc.lastError)
+    const exhausted = acc.usage.limit > 0 && acc.usage.current >= acc.usage.limit
+    if (!banned && !exhausted) usable.push(acc.email || acc.id.slice(0, 8))
+    else unusable.push(acc.email || acc.id.slice(0, 8))
+  }
+
+  const ratio = usable.length / total
+  if (ratio > threshold) {
+    accountPoolLowAlerted = false // 回升，允许下次再报
+    return
+  }
+  if (accountPoolLowAlerted) return // 已报过，等回升
+  accountPoolLowAlerted = true
+
+  const percent = Math.round(ratio * 100)
+  const MAX_LIST = 20
+  const unusableList = unusable.length > MAX_LIST
+    ? `${unusable.slice(0, MAX_LIST).join('、')} 等 ${unusable.length} 个`
+    : (unusable.join('、') || '-')
+  triggerWebhook('account-pool-warning', {
+    title: '账号池可用账号不足',
+    message: `可用账号已降至 ${usable.length}/${total}（${percent}%），低于报警阈值 ${Math.round(threshold * 100)}%。`,
+    level: 'error',
+    fields: {
+      可用账号: usable.length,
+      总账号: total,
+      可用占比: `${percent}%`,
+      报警阈值: `${Math.round(threshold * 100)}%`,
+      不可用账号: unusableList
+    }
+  })
+}
+
 /** 触发 Webhook 事件（封装错误处理，不阻塞主业务流程） */
 function triggerWebhook(event: WebhookEvent, payload: WebhookMessage): void {
   try {
@@ -3368,6 +3464,54 @@ function triggerWebhook(event: WebhookEvent, payload: WebhookMessage): void {
   } catch (err) {
     console.warn(`[Webhook] trigger ${event} failed:`, err)
   }
+}
+
+/**
+ * 上游账号额度报警去重：accountId → 已报警的"重置周期标识"。
+ * 用 nextResetDate 作为周期标识，跨月（重置日期变化）后自动允许再次报警，
+ * 实现"每个计费周期最多报一次"。
+ */
+const accountUsageAlerted = new Map<string, string>()
+
+/**
+ * 检测上游 Kiro 账号月度额度是否达到阈值，达到则推送 webhook（account-usage-warning）。
+ * 在 checkAccountStatus 拿到最新 usage 后调用。纯内存比较，无 IO，不影响性能。
+ */
+function checkAccountUsageAlert(
+  account: { id: string; email?: string },
+  usage: { current?: number; limit?: number; percentUsed?: number; nextResetDate?: string },
+  threshold: number
+): void {
+  if (threshold <= 0) return // 关闭
+  const limit = usage.limit || 0
+  if (limit <= 0) return // 无额度信息
+  const ratio = usage.percentUsed ?? (usage.current || 0) / limit
+  if (ratio < threshold) {
+    // 低于阈值：若额度已重置（新周期），清掉旧的已报警标记，允许下周期再报
+    accountUsageAlerted.delete(account.id)
+    return
+  }
+  // 达到阈值：同一重置周期只报一次
+  const cycle = usage.nextResetDate || 'no-reset'
+  if (accountUsageAlerted.get(account.id) === cycle) return
+  accountUsageAlerted.set(account.id, cycle)
+
+  const percent = Math.min(100, Math.round(ratio * 100))
+  const emailShort = account.email || account.id.slice(0, 8)
+  const resetText = usage.nextResetDate
+    ? new Date(usage.nextResetDate).toLocaleDateString()
+    : '-'
+  triggerWebhook('account-usage-warning', {
+    title: `上游账号额度告警：${emailShort}`,
+    message: `账号「${emailShort}」本周期额度已用 ${percent}%（${(usage.current || 0).toFixed(0)}/${limit}），下次重置：${resetText}。`,
+    level: ratio >= 1 ? 'error' : 'warn',
+    fields: {
+      账号: emailShort,
+      已用: `${(usage.current || 0).toFixed(0)}/${limit}`,
+      使用率: `${percent}%`,
+      下次重置: resetText
+    }
+  })
 }
 
 // ==================== 代理 URL 解析辅助 ====================
